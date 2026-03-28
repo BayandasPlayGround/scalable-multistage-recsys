@@ -4,7 +4,8 @@ __pycache__/
 *$py.class
 
 # Additioinal paths
-research/amazon_review_data
+**/amazon_review_data
+notebooks/amazon_review_data
 
 # C extensions
 *.so
