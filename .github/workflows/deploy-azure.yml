@@ -1,0 +1,10 @@
+name: Deploy Azure
+
+on:
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Manual-only Azure deployment placeholder."

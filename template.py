@@ -67,6 +67,31 @@ SCAFFOLD_FILES = [
     "tests/test_container.py",
 ]
 
+WORKFLOW_TEMPLATES = {
+    ".github/workflows/ci.yml": """name: CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Manual-only CI placeholder."
+""",
+    ".github/workflows/deploy-azure.yml": """name: Deploy Azure
+
+on:
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Manual-only Azure deployment placeholder."
+""",
+}
+
 
 def create_project_template(target_root: Path, source_root: Path | None = None) -> list[Path]:
     source_root = source_root or Path(__file__).resolve().parent
@@ -82,6 +107,12 @@ def create_project_template(target_root: Path, source_root: Path | None = None) 
 
         if target_path.exists() and target_path.stat().st_size > 0:
             logging.info("Skipping existing file: %s", target_path)
+            continue
+
+        if relative_path in WORKFLOW_TEMPLATES:
+            target_path.write_text(WORKFLOW_TEMPLATES[relative_path], encoding="utf-8")
+            logging.info("Created workflow template: %s", target_path)
+            created_files.append(target_path)
             continue
 
         if source_path.exists() and source_path.resolve() != target_path.resolve():
