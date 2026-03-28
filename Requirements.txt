@@ -1,10 +1,17 @@
 annoy
+fastapi
+httpx
+jinja2
 nbformat
 numpy
 pandas
 pyarrow
+pydantic-settings
+pytest
+python-dotenv
 scikit-learn
 scipy
 tensorflow
 tqdm
+uvicorn
 xgboost
