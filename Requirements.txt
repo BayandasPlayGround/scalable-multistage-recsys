@@ -1,0 +1,10 @@
+annoy
+nbformat
+numpy
+pandas
+pyarrow
+scikit-learn
+scipy
+tensorflow
+tqdm
+xgboost

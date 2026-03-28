@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Additioinal paths
+research/amazon_review_data
+
 # C extensions
 *.so
 
