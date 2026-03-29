@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(me
 
 
 SCAFFOLD_FILES = [
-    ".env.example",
+    ".env",
     "pyproject.toml",
     "Dockerfile",
     "docker-compose.yml",
