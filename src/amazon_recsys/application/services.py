@@ -5,7 +5,7 @@ from typing import Any
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import BundleManifest, HistoryItem, RecommendationItem, RuntimeBundle, utcnow_iso
 from amazon_recsys.infrastructure.artifacts import LocalArtifactStore
-from amazon_recsys.ml.legacy import load_legacy_pipeline
+from amazon_recsys.ml import core
 
 
 def _mock_bundle(settings: AppSettings) -> RuntimeBundle:
@@ -98,8 +98,7 @@ class BundleRecommendationService:
                 )
                 for index in range(1, effective_top_k + 1)
             ]
-        legacy = load_legacy_pipeline()
-        frame = legacy.recommend(
+        frame = core.recommend(
             bundle.prepared,
             bundle.split_artifacts,
             bundle.retrievers,
@@ -167,8 +166,7 @@ class BundleRecommendationService:
         bundle = self._load_bundle()
         if bundle.is_mock:
             return []
-        legacy = load_legacy_pipeline()
-        history = legacy.get_user_order_history(
+        history = core.get_user_order_history(
             bundle.prepared,
             bundle.split_artifacts,
             user_id=user_id,

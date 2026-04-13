@@ -6,7 +6,7 @@ from functools import lru_cache
 from amazon_recsys.application.services import BundleRecommendationService
 from amazon_recsys.config.settings import AppSettings, get_settings
 from amazon_recsys.infrastructure.artifacts import LocalArtifactStore
-from amazon_recsys.ml.pipelines import LegacyTrainingPipeline
+from amazon_recsys.ml.pipelines import PackageTrainingPipeline
 from amazon_recsys.observability.logging import configure_logging
 
 
@@ -14,7 +14,7 @@ from amazon_recsys.observability.logging import configure_logging
 class Container:
     settings: AppSettings
     artifact_store: LocalArtifactStore
-    training_pipeline: LegacyTrainingPipeline
+    training_pipeline: PackageTrainingPipeline
     recommendation_service: BundleRecommendationService
 
 
@@ -22,7 +22,7 @@ def build_container(settings: AppSettings | None = None) -> Container:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
     artifact_store = LocalArtifactStore(resolved_settings)
-    training_pipeline = LegacyTrainingPipeline(resolved_settings)
+    training_pipeline = PackageTrainingPipeline(resolved_settings)
     recommendation_service = BundleRecommendationService(
         artifact_store=artifact_store,
         settings=resolved_settings,

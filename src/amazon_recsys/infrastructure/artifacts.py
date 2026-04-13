@@ -8,6 +8,7 @@ from typing import Any
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import ActiveBundlePointer, BundleManifest, RuntimeBundle, utcnow_iso
 from amazon_recsys.ml.bundles import build_bundle_manifest, build_runtime_bundle, generate_bundle_version
+from amazon_recsys.ml import core  # noqa: F401
 from amazon_recsys.ml.legacy import load_legacy_pipeline
 
 
@@ -85,6 +86,7 @@ class LocalArtifactStore:
         return BundleManifest.from_dict(self._read_json(manifest_path))
 
     def load_bundle(self, manifest: BundleManifest) -> RuntimeBundle:
+        # Import both module paths so bundles created before and after the migration unpickle cleanly.
         load_legacy_pipeline()
         with open(manifest.runtime_bundle_file, "rb") as handle:
             return pickle.load(handle)

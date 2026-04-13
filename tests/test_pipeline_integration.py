@@ -23,6 +23,8 @@ def test_training_bundle_round_trip(test_container) -> None:
     summary = test_container.recommendation_service.get_evaluation_summary()
 
     assert pointer.version == "fixture-bundle"
+    assert session.pipeline_config.__class__.__module__ == "amazon_recsys.ml.core"
+    assert session.prepared.__class__.__module__ == "amazon_recsys.ml.core"
     assert 1 <= len(recommendations) <= 3
     assert history
     assert model["version"] == "fixture-bundle"

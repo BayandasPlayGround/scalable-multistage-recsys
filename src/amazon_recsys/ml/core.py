@@ -3842,16 +3842,3 @@ def save_config(config: PipelineConfig) -> Path:
     with open(config_path, "w", encoding="utf-8") as handle:
         json.dump(serializable, handle, indent=2)
     return config_path
-
-
-# Compatibility re-export:
-# the package module is now the source of truth and the notebook imports it.
-import sys as _compat_sys
-from pathlib import Path as _compat_Path
-
-_REPO_ROOT = _compat_Path(__file__).resolve().parents[1]
-_SRC_ROOT = _REPO_ROOT / "src"
-if str(_SRC_ROOT) not in _compat_sys.path:
-    _compat_sys.path.insert(0, str(_SRC_ROOT))
-
-from amazon_recsys.ml.core import *  # noqa: F401,F403,E402

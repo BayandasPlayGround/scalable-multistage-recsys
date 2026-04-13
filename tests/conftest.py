@@ -139,8 +139,43 @@ def test_settings(synthetic_workspace: Path) -> AppSettings:
 def mock_settings(workspace_dir: Path) -> AppSettings:
     settings = AppSettings(
         workspace_root=workspace_dir,
+        environment="local",
         use_mock_bundle_if_missing=True,
         show_progress=False,
+    )
+    settings.ensure_runtime_directories()
+    return settings
+
+
+@pytest.fixture
+def production_settings(synthetic_workspace: Path) -> AppSettings:
+    settings = AppSettings(
+        workspace_root=synthetic_workspace,
+        environment="production",
+        debug=False,
+        reload=False,
+        data_dir=Path("amazon_review_data"),
+        categories=("All_Beauty",),
+        metadata_download_if_missing=False,
+        use_mock_bundle_if_missing=False,
+        run_name="prod-pytest",
+        run_profile="debug",
+        show_progress=False,
+        dev_mode=False,
+        k_core=2,
+        eval_user_cap=10,
+        retrieval_top_k=10,
+        candidate_union_top_k=12,
+        candidate_union_batch_size=20,
+        cooccurrence_candidate_k=10,
+        latent_cf_candidate_k=10,
+        content_candidate_k=10,
+        neural_candidate_k=10,
+        ranker_candidate_top_k=10,
+        ranker_train_example_cap=50,
+        ranker_val_example_cap=10,
+        ranker_negatives_per_positive=3,
+        xgb_n_estimators=10,
     )
     settings.ensure_runtime_directories()
     return settings

@@ -2,20 +2,28 @@
 
 This repository now supports two valid ways of working:
 
-- a **notebook-first recommender workflow** that still contains the main working ML logic
-- a **new production scaffold** for modular code, APIs, frontend demoing, testing, and Azure deployment
+- a **package-first production workflow** under `src/amazon_recsys/`
+- a **notebook workflow** that consumes the package-owned ML core
 
-The project can grow from experimentation into an application without losing the notebook path that already works.
+The recommender engine now lives in:
+
+- `src/amazon_recsys/ml/core.py`
+
+The notebook-facing entrypoint:
+
+- `notebooks/amazon_recsys_pipeline.py`
+
+is now a compatibility layer that re-exports the package implementation.
 
 ## Moving from the research environment into the production environment
 
-The research environment was mostly:
+The earlier research environment was mostly:
 
 - `RecSys.ipynb`
 - `amazon_recsys_pipeline.py`
 - research files in `Research/`
 
-Now the production/development environment also includes:
+The current production/development environment includes:
 
 - a modular package under `src/amazon_recsys/`
 - a FastAPI + Jinja scaffold for serving and demoing recommendations
@@ -26,20 +34,19 @@ Now the production/development environment also includes:
 
 The shortest mental model is:
 
-- **use the notebook to prove the model**
-- **use `src/amazon_recsys/` to productionize the project**
+- **use `src/amazon_recsys/` as the source of truth**
+- **use the notebook as a client of that code**
 
 ## The Two Working Modes
 
 ### Notebook / research mode
 
-This is still the main end-to-end implementation.
+This is now the notebook-facing experience over the package ML core.
 
 Primary files:
 
-- `RecSys.ipynb`
-- `amazon_recsys_pipeline.py`
-- `DAT.ipynb`
+- `notebooks/RecSys.ipynb`
+- `notebooks/amazon_recsys_pipeline.py`
 - `Research/`
 
 Use this mode for:
@@ -52,7 +59,7 @@ Use this mode for:
 
 ### Production scaffold mode
 
-This is the new application-oriented codebase.
+This is the application-oriented source of truth.
 
 Primary files and folders:
 
@@ -67,9 +74,10 @@ Primary files and folders:
 
 Use this mode for:
 
-- modular refactoring
+- the authoritative ML implementation
 - service interfaces
 - API development
+- bundle export and serving
 - frontend prototyping
 - containerization
 - Azure deployment preparation
@@ -162,18 +170,17 @@ Recommender Systems/
 |-- pyproject.toml
 |-- template.py
 |-- app.py
-|-- RecSys.ipynb
-|-- DAT.ipynb
-|-- amazon_recsys_pipeline.py
 |-- Dockerfile
 |-- docker-compose.yml
 |-- .env.example
+|-- notebooks/
+|   |-- RecSys.ipynb
+|   `-- amazon_recsys_pipeline.py
 |-- src/
 |   `-- amazon_recsys/
 |-- tests/
 |-- infra/
 |   `-- azure/
-|-- notebooks/
 |-- Research/
 |-- artifacts/
 |-- amazon_review_data/
@@ -181,9 +188,9 @@ Recommender Systems/
 
 How to interpret that:
 
-- `RecSys.ipynb` and `amazon_recsys_pipeline.py` are still the main working implementation
-- `src/amazon_recsys/` is the target production codebase
-- `artifacts/` stores caches, trained artifacts, and evaluation outputs
+- `src/amazon_recsys/` is the production codebase and current source of truth
+- `notebooks/amazon_recsys_pipeline.py` is the notebook compatibility import layer
+- `artifacts/` stores caches, trained artifacts, bundles, and evaluation outputs
 - `amazon_review_data/` stores local source data and metadata
 
 ## `template.py`
@@ -244,15 +251,15 @@ Intended responsibilities:
 - `aks/`
   - serving deployment manifests
 
-This is currently scaffold-level. The actual training logic still lives in the notebook path until the migration into `src/amazon_recsys/` is complete.
+This is still scaffold-level for deployment, but the actual training and inference logic now lives in `src/amazon_recsys/ml/core.py`.
 
 ## Configuration Story
 
 There are now effectively two configuration layers.
 
-### Notebook configuration
+### Core ML configuration
 
-The notebook workflow is still controlled mainly by `PipelineConfig` inside `amazon_recsys_pipeline.py`.
+The recommender workflow is controlled mainly by `PipelineConfig` inside `src/amazon_recsys/ml/core.py`.
 
 That covers:
 
@@ -263,9 +270,9 @@ That covers:
 - evaluation controls
 - artifact locations
 
-### Application configuration
+### Application/runtime configuration
 
-The production scaffold is moving toward typed settings under `src/amazon_recsys/config/`.
+The application runtime is controlled by typed settings under `src/amazon_recsys/config/`.
 
 The intended split is:
 
@@ -286,10 +293,10 @@ Environment-driven values are documented in:
 
 Start with:
 
-- `RecSys.ipynb`
-- `amazon_recsys_pipeline.py`
+- `notebooks/RecSys.ipynb`
+- `src/amazon_recsys/ml/core.py`
 
-That is still the correct place for:
+That is the correct place for:
 
 - model debugging
 - offline metrics
@@ -307,7 +314,7 @@ Start with:
 
 That is the correct place for:
 
-- extracting reusable logic from the notebook path
+- changing the production implementation directly
 - building service interfaces
 - serving recommendations
 - adding UI and API behavior
@@ -352,7 +359,7 @@ pip install -e .[dev]
 
 Open:
 
-- `RecSys.ipynb`
+- `notebooks/RecSys.ipynb`
 
 ### Run the scaffolded app
 
@@ -366,38 +373,126 @@ uvicorn app:app --reload
 pytest
 ```
 
+### Export and activate a local bundle
+
+```bash
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+```
+
 ## Migration Status
 
 ### Already real
 
-- notebook recommender flow
+- package-owned ML core in `src/amazon_recsys/ml/core.py`
+- notebook compatibility import layer
 - hybrid retrieval experimentation
 - XGBoost-first ranking direction
-- artifact generation and evaluation outputs
-- package scaffold
+- artifact generation, evaluation outputs, and bundle activation
 - FastAPI + Jinja scaffold
 - Docker and compose files
 - Azure folder structure
-- test skeletons
+- local-dev and production-like tests
 
-### Still in migration
+### Still evolving
 
-- moving working ML logic out of `amazon_recsys_pipeline.py`
-- hardening bundle loading and online inference
+- further splitting `ml/core.py` into smaller package modules over time
+- hardening bundle export beyond the default classical + XGBoost path
 - wiring real Azure ML training jobs
-- replacing placeholder adapters with migrated production logic
-
-So the repository is better structured now, but still **mid-migration** rather than fully productionized.
+- validating Azure deployment against a live subscription
 
 ## Recommended Mental Model
 
 If the upgrade feels large, keep this short map in mind:
 
-- `RecSys.ipynb` proves the recommender
-- `amazon_recsys_pipeline.py` is the current working engine
-- `src/amazon_recsys/` is the future production codebase
+- `src/amazon_recsys/ml/core.py` is the recommender engine
+- `notebooks/amazon_recsys_pipeline.py` is the notebook compatibility layer
+- `src/amazon_recsys/application/services.py` serves active bundles
 - `template.py` recreates the scaffold
 - `infra/azure/` prepares deployment
-- `tests/` protect the architecture while migration continues
+- `tests/` protect both local-dev and production-like behavior
 
 That is the simplest way to make sense of the upgrade.
+
+## Local Dev Vs Production-Like Runbook
+
+### Local dev mode
+
+Use this when you want quick feedback and safe startup behavior.
+
+Recommended settings:
+
+- `AMAZON_RECSYS_ENVIRONMENT=local`
+- `AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING=true`
+- `AMAZON_RECSYS_RUN_PROFILE=debug`
+- `AMAZON_RECSYS_ENABLE_NEURAL_RETRIEVER=false`
+
+Typical commands:
+
+```bash
+pip install -e .[dev]
+uvicorn app:app --reload
+pytest -m "foundation or config or serving"
+```
+
+If you want a real local bundle:
+
+```bash
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+python -m amazon_recsys.cli.main serve
+```
+
+### Production-like local mode
+
+Use this when you want readiness and serving semantics closer to production.
+
+Recommended settings:
+
+- `AMAZON_RECSYS_ENVIRONMENT=production`
+- `AMAZON_RECSYS_DEBUG=false`
+- `AMAZON_RECSYS_RELOAD=false`
+- `AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING=false`
+
+Typical commands:
+
+```bash
+python -m amazon_recsys.cli.main export-bundle --run-name prod-local --run-profile debug --activate
+python -m amazon_recsys.cli.main serve
+```
+
+Expected behavior:
+
+- `/ready` returns `503` before a real bundle is activated
+- `/ready` returns `200` after activation
+- `/models/active` reports the active bundle metadata
+
+## Verification Matrix
+
+Run the full suite:
+
+```bash
+pytest
+```
+
+Fast local-dev checks:
+
+```bash
+pytest -m "foundation or config or serving"
+```
+
+Real-bundle training and serving checks:
+
+```bash
+pytest -m "data or retrieval or ranking or serving"
+```
+
+Environment mode checks:
+
+```bash
+pytest tests/test_runtime_modes.py
+```
+
+Notebook compatibility check:
+
+```bash
+pytest tests/test_notebook_compatibility.py
+```

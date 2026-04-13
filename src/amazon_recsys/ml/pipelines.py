@@ -7,7 +7,7 @@ from typing import Any
 import pandas as pd
 
 from amazon_recsys.config.settings import AppSettings
-from amazon_recsys.ml.legacy import load_legacy_pipeline
+from amazon_recsys.ml import core
 
 
 def _metric_preview(csv_path: Path) -> dict[str, Any]:
@@ -19,20 +19,20 @@ def _metric_preview(csv_path: Path) -> dict[str, Any]:
     }
 
 
-def collect_evaluation_summary(legacy_config: Any) -> dict[str, Any]:
-    eval_dir = Path(legacy_config.eval_dir)
+def collect_evaluation_summary(pipeline_config: Any) -> dict[str, Any]:
+    eval_dir = Path(pipeline_config.eval_dir)
     metric_files = sorted(eval_dir.glob("*_metrics.csv"))
     return {
         "eval_dir": str(eval_dir),
         "metric_files": [_metric_preview(csv_path) for csv_path in metric_files],
-        "config_path": str(Path(legacy_config.artifact_root) / "config.json"),
+        "config_path": str(Path(pipeline_config.artifact_root) / "config.json"),
     }
 
 
 @dataclass
-class LegacyTrainingSession:
+class TrainingSession:
     settings: AppSettings
-    legacy_config: Any
+    pipeline_config: Any
     prepared: Any
     split_artifacts: Any
     retrievers: dict[str, Any]
@@ -40,13 +40,12 @@ class LegacyTrainingSession:
     evaluation_summary: dict[str, Any]
 
 
-class LegacyTrainingPipeline:
+class PackageTrainingPipeline:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
 
-    def build_legacy_config(self) -> Any:
-        legacy = load_legacy_pipeline()
-        config = legacy.PipelineConfig(
+    def build_pipeline_config(self) -> Any:
+        config = core.PipelineConfig(
             base_dir=self.settings.legacy_workspace_root,
             categories=self.settings.data.categories,
             run_name=self.settings.training.run_name,
@@ -77,19 +76,18 @@ class LegacyTrainingPipeline:
             xgb_subsample=self.settings.ranking.xgb_subsample,
             xgb_colsample_bytree=self.settings.ranking.xgb_colsample_bytree,
         )
-        return legacy.apply_run_profile(config)
+        return core.apply_run_profile(config)
 
-    def run(self, force_rebuild: bool = False) -> LegacyTrainingSession:
-        legacy = load_legacy_pipeline()
-        config = self.build_legacy_config()
-        prepared = legacy.prepare_corpus(config, force_rebuild=force_rebuild)
-        split_artifacts = legacy.make_splits(prepared)
-        retrievers = legacy.train_retrievers(prepared, split_artifacts)
-        ranker = legacy.train_ranker(prepared, split_artifacts, retrievers, backend=config.ranker_backend)
+    def run(self, force_rebuild: bool = False) -> TrainingSession:
+        config = self.build_pipeline_config()
+        prepared = core.prepare_corpus(config, force_rebuild=force_rebuild)
+        split_artifacts = core.make_splits(prepared)
+        retrievers = core.train_retrievers(prepared, split_artifacts)
+        ranker = core.train_ranker(prepared, split_artifacts, retrievers, backend=config.ranker_backend)
         evaluation_summary = collect_evaluation_summary(config)
-        return LegacyTrainingSession(
+        return TrainingSession(
             settings=self.settings,
-            legacy_config=config,
+            pipeline_config=config,
             prepared=prepared,
             split_artifacts=split_artifacts,
             retrievers=retrievers,
@@ -98,9 +96,13 @@ class LegacyTrainingPipeline:
         )
 
     def evaluate(self, force_rebuild: bool = False) -> dict[str, Any]:
-        config = self.build_legacy_config()
+        config = self.build_pipeline_config()
         eval_dir = Path(config.eval_dir)
         if not eval_dir.exists() or not any(eval_dir.glob("*_metrics.csv")):
             session = self.run(force_rebuild=force_rebuild)
             return session.evaluation_summary
         return collect_evaluation_summary(config)
+
+
+LegacyTrainingSession = TrainingSession
+LegacyTrainingPipeline = PackageTrainingPipeline

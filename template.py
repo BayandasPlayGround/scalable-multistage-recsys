@@ -41,6 +41,7 @@ SCAFFOLD_FILES = [
     "src/amazon_recsys/infrastructure/rankers.py",
     "src/amazon_recsys/infrastructure/azure.py",
     "src/amazon_recsys/ml/__init__.py",
+    "src/amazon_recsys/ml/core.py",
     "src/amazon_recsys/ml/legacy.py",
     "src/amazon_recsys/ml/bundles.py",
     "src/amazon_recsys/ml/feature_builders.py",
@@ -68,6 +69,8 @@ SCAFFOLD_FILES = [
     "tests/test_api_app.py",
     "tests/test_container.py",
     "tests/test_pipeline_integration.py",
+    "tests/test_notebook_compatibility.py",
+    "tests/test_runtime_modes.py",
 ]
 
 WORKFLOW_TEMPLATES = {

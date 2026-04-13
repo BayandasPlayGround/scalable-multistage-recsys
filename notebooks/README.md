@@ -7,7 +7,11 @@ The current implementation is intentionally structured as a scalable two-stage r
 1. high-recall candidate generation
 2. high-precision ranking
 
-The notebook front-end is [RecSys.ipynb](./RecSys.ipynb). The modeling and pipeline logic live in [amazon_recsys_pipeline.py](./amazon_recsys_pipeline.py).
+The notebook front-end is [RecSys.ipynb](./RecSys.ipynb).
+
+The notebook import layer lives in [amazon_recsys_pipeline.py](./amazon_recsys_pipeline.py), but the package-owned ML implementation now lives in:
+
+- `src/amazon_recsys/ml/core.py`
 
 ## What This Project Does
 
@@ -38,7 +42,7 @@ The pipeline:
 ## Repository Layout
 
 - [RecSys.ipynb](./RecSys.ipynb): main notebook
-- [amazon_recsys_pipeline.py](./amazon_recsys_pipeline.py): production-style pipeline functions and model code
+- [amazon_recsys_pipeline.py](./amazon_recsys_pipeline.py): notebook compatibility import layer over the package ML core
 - [_generate_recsys_notebook.py](./_generate_recsys_notebook.py): notebook generator
 - [Requirements.txt](./Requirements.txt): Python dependencies
 - [`amazon_review_data/`](./amazon_review_data): raw review data and metadata
