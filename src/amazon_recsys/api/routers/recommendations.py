@@ -1,0 +1,59 @@
+from dataclasses import asdict
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from amazon_recsys.api.dependencies import get_recommendation_service
+from amazon_recsys.api.schemas import (
+    HistoryItemResponse,
+    HistoryResponse,
+    RecommendationItemResponse,
+    RecommendationRequest,
+    RecommendationResponse,
+)
+from amazon_recsys.application.services import BundleRecommendationService
+
+
+router = APIRouter(tags=["recommendations"])
+
+
+@router.post("/recommend", response_model=RecommendationResponse)
+def recommend(
+    request: RecommendationRequest,
+    service: BundleRecommendationService = Depends(get_recommendation_service),
+) -> RecommendationResponse:
+    try:
+        items = service.recommend(
+            user_id=request.user_id,
+            history_items=request.history_items,
+            top_k=request.top_k,
+        )
+        model = service.get_active_model()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return RecommendationResponse(
+        top_k=request.top_k or len(items),
+        source=model["source"],
+        active_bundle_version=model["version"],
+        items=[RecommendationItemResponse(**asdict(item)) for item in items],
+    )
+
+
+@router.get("/users/{user_id}/history", response_model=HistoryResponse)
+def user_history(
+    user_id: str,
+    service: BundleRecommendationService = Depends(get_recommendation_service),
+) -> HistoryResponse:
+    try:
+        items = service.get_user_history(user_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return HistoryResponse(
+        user_id=user_id,
+        items=[HistoryItemResponse(**asdict(item)) for item in items],
+    )

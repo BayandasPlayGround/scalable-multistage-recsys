@@ -2863,6 +2863,23 @@ def generate_candidate_union(
                 "from_injected_positive": 1,
             }
         example_rows = pd.DataFrame(item_map.values())
+        if example_rows.empty and inject_target_if_missing and str(example_meta["split"]) != "inference":
+            example_rows = pd.DataFrame(
+                [
+                    {
+                        **example_meta,
+                        "item_idx": target_item_idx,
+                        "label": 1,
+                        "source_count": 0,
+                        "union_score": 0.0,
+                        "from_injected_positive": 1,
+                    }
+                ]
+            )
+        if "union_score" not in example_rows.columns:
+            example_rows["union_score"] = pd.Series(dtype=float)
+        if "source_count" not in example_rows.columns:
+            example_rows["source_count"] = pd.Series(dtype=np.int32)
         for source_name, budget in budgets.items():
             if source_name == "popularity":
                 example_rows[f"from_{source_name}"] = example_rows.get(f"from_{source_name}", 0)
@@ -2880,6 +2897,11 @@ def generate_candidate_union(
     if not rows:
         return _empty_candidate_frame()
     union = pd.concat(rows, ignore_index=True)
+    if union.empty:
+        union = _empty_candidate_frame()
+        if include_candidate_sources:
+            union["candidate_sources"] = pd.Series(dtype=str)
+        return union
     source_names = ["cooccurrence", "latent_cf", "content_based", "two_tower", "popularity"]
     for source_name in source_names:
         flag_col = f"from_{source_name}"
@@ -2887,16 +2909,19 @@ def generate_candidate_union(
             union[flag_col] = 0
         union[flag_col] = union[flag_col].fillna(0).astype(np.int8)
     if include_candidate_sources:
-        union["candidate_sources"] = union.apply(
-            lambda row: " + ".join(
-                [
-                    source_name
-                    for source_name in source_names
-                    if int(row[f"from_{source_name}"]) == 1
-                ]
-            ),
-            axis=1,
-        )
+        if union.empty:
+            union["candidate_sources"] = pd.Series(dtype=str)
+        else:
+            union["candidate_sources"] = union.apply(
+                lambda row: " + ".join(
+                    [
+                        source_name
+                        for source_name in source_names
+                        if int(row[f"from_{source_name}"]) == 1
+                    ]
+                ),
+                axis=1,
+            )
     return union
 
 

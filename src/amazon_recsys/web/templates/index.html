@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel-grid">
+  <article class="panel">
+    <h2>Active Model</h2>
+    <dl class="metadata">
+      <div><dt>Status</dt><dd>{{ active_model.status if active_model.status is defined else ("ready" if active_model.ready else "not_ready") }}</dd></div>
+      <div><dt>Source</dt><dd>{{ active_model.source }}</dd></div>
+      <div><dt>Version</dt><dd>{{ active_model.version or "none" }}</dd></div>
+      <div><dt>Run</dt><dd>{{ active_model.run_name if active_model.run_name is defined else "n/a" }}</dd></div>
+      <div><dt>Profile</dt><dd>{{ active_model.run_profile if active_model.run_profile is defined else "n/a" }}</dd></div>
+    </dl>
+  </article>
+  <article class="panel">
+    <h2>Recommendation Query</h2>
+    <form class="query-form" method="get" action="/">
+      <label>
+        User ID
+        <input type="text" name="user_id" value="{{ user_id }}" placeholder="Known user id" />
+      </label>
+      <label>
+        History Items
+        <input type="text" name="history_items" value="{{ history_items }}" placeholder="ASIN1,ASIN2,ASIN3" />
+      </label>
+      <label>
+        Top K
+        <input type="number" min="1" max="50" name="top_k" value="{{ top_k }}" />
+      </label>
+      <button type="submit">Recommend</button>
+    </form>
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+  </article>
+</section>
+
+<section class="panel">
+  <h2>Recommendations</h2>
+  {% if recommendations %}
+  <table>
+    <thead>
+      <tr>
+        <th>Item</th>
+        <th>Category</th>
+        <th>Price</th>
+        <th>Rating</th>
+        <th>Sources</th>
+        <th>Score</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in recommendations %}
+      <tr>
+        <td>{{ item.item_id }}<span class="subtle">{{ item.title }}</span></td>
+        <td>{{ item.source_category }}</td>
+        <td>{{ item.price }}</td>
+        <td>{{ item.average_rating }}</td>
+        <td>{{ item.candidate_sources or "n/a" }}</td>
+        <td>{{ item.score or item.retrieval_score }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="subtle">Submit a user id or comma-separated history items to generate recommendations.</p>
+  {% endif %}
+</section>
+
+<section class="panel-grid">
+  <article class="panel">
+    <h2>User History</h2>
+    {% if history %}
+    <table>
+      <thead>
+        <tr>
+          <th>Ordered</th>
+          <th>Item</th>
+          <th>Rating</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in history %}
+        <tr>
+          <td>{{ item.ordered_at }}</td>
+          <td>{{ item.item_id }}<span class="subtle">{{ item.title }}</span></td>
+          <td>{{ item.review_rating }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="subtle">History is shown for known user ids backed by the active bundle.</p>
+    {% endif %}
+  </article>
+  <article class="panel">
+    <h2>Evaluation Summary</h2>
+    <p class="subtle">Metric files tracked in the active bundle: {{ evaluation_summary.metric_files | length if evaluation_summary.metric_files is defined else 0 }}</p>
+    {% if evaluation_summary.metric_files is defined and evaluation_summary.metric_files %}
+    <ul class="metric-list">
+      {% for metric_file in evaluation_summary.metric_files %}
+      <li>{{ metric_file.file }} ({{ metric_file.rows }} rows)</li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="subtle">No bundle metrics are active yet.</p>
+    {% endif %}
+  </article>
+</section>
+{% endblock %}

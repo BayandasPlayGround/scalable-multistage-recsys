@@ -1,0 +1,12 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+code: ../../..
+command: >-
+  python -m amazon_recsys.cli.main export-bundle
+  --run-name aml-run
+  --run-profile debug
+  --version aml-${{name}}
+  --activate
+environment: azureml:amazon-recsys-env@latest
+compute: azureml:cpu-cluster
+display_name: amazon-recsys-train
+experiment_name: amazon-recsys

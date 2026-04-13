@@ -41,6 +41,7 @@ SCAFFOLD_FILES = [
     "src/amazon_recsys/infrastructure/rankers.py",
     "src/amazon_recsys/infrastructure/azure.py",
     "src/amazon_recsys/ml/__init__.py",
+    "src/amazon_recsys/ml/legacy.py",
     "src/amazon_recsys/ml/bundles.py",
     "src/amazon_recsys/ml/feature_builders.py",
     "src/amazon_recsys/ml/pipelines.py",
@@ -62,9 +63,11 @@ SCAFFOLD_FILES = [
     "src/amazon_recsys/cli/__init__.py",
     "src/amazon_recsys/cli/main.py",
     "tests/__init__.py",
+    "tests/conftest.py",
     "tests/test_template.py",
     "tests/test_api_app.py",
     "tests/test_container.py",
+    "tests/test_pipeline_integration.py",
 ]
 
 WORKFLOW_TEMPLATES = {
@@ -72,12 +75,24 @@ WORKFLOW_TEMPLATES = {
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["main"]
+  pull_request:
 
 jobs:
-  placeholder:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Manual-only CI placeholder."
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+      - name: Run tests
+        run: pytest -p no:cacheprovider
 """,
     ".github/workflows/deploy-azure.yml": """name: Deploy Azure
 
@@ -85,10 +100,15 @@ on:
   workflow_dispatch:
 
 jobs:
-  placeholder:
+  validate-scaffold:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Manual-only Azure deployment placeholder."
+      - uses: actions/checkout@v4
+      - name: Validate Azure scaffold presence
+        run: |
+          test -f infra/azure/bicep/main.bicep
+          test -f infra/azure/aml/train-job.yml
+          test -f infra/azure/aks/deployment.yaml
 """,
 }
 

@@ -4,7 +4,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  placeholder:
+  validate-scaffold:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Manual-only Azure deployment placeholder."
+      - uses: actions/checkout@v4
+      - name: Validate Azure scaffold presence
+        run: |
+          test -f infra/azure/bicep/main.bicep
+          test -f infra/azure/aml/train-job.yml
+          test -f infra/azure/aks/deployment.yaml

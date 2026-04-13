@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: amazon-recsys-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: amazon-recsys-api
+  template:
+    metadata:
+      labels:
+        app: amazon-recsys-api
+    spec:
+      containers:
+        - name: api
+          image: amazon-recsys:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: AMAZON_RECSYS_ACTIVE_BUNDLE_PATH
+              value: /app/artifacts/production/active_bundle.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: amazon-recsys-api
+spec:
+  selector:
+    app: amazon-recsys-api
+  ports:
+    - port: 80
+      targetPort: 8000
