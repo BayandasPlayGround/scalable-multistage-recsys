@@ -1,146 +1,373 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="panel-grid">
-  <article class="panel">
-    <h2>Active Model</h2>
-    <dl class="metadata">
-      <div><dt>Status</dt><dd>{{ active_model.status if active_model.status is defined else ("ready" if active_model.ready else "not_ready") }}</dd></div>
-      <div><dt>Source</dt><dd>{{ active_model.source }}</dd></div>
-      <div><dt>Version</dt><dd>{{ active_model.version or "none" }}</dd></div>
-      <div><dt>Run</dt><dd>{{ active_model.run_name if active_model.run_name is defined else "n/a" }}</dd></div>
-      <div><dt>Profile</dt><dd>{{ active_model.run_profile if active_model.run_profile is defined else "n/a" }}</dd></div>
-    </dl>
+{% set model_status = active_model.status if active_model.status is defined else ("ready" if active_model.ready else "not_ready") %}
+{% set metric_files = evaluation_summary.metric_files if evaluation_summary.metric_files is defined else [] %}
+
+<section class="hero-banner" id="overview">
+  <article class="hero-card hero-card-main">
+    <p class="section-kicker">Azure-First Recommender Platform</p>
+    <h1>Amazon RecSys Control Centre</h1>
+    <p class="hero-lead">
+      A professional review surface for your advanced analytics team to inspect bundle readiness, test user-level recommendations,
+      and monitor the quality signals behind the active model.
+    </p>
+    <div class="hero-actions">
+      <a class="button-primary" href="#query">Run a recommendation query</a>
+      <a class="button-secondary" href="/docs">Open API docs</a>
+    </div>
   </article>
-  <article class="panel">
-    <h2>Recommendation Query</h2>
-    <form class="query-form" method="get" action="/">
-      <label>
-        User ID
-        <input type="text" name="user_id" value="{{ user_id }}" list="available-users" placeholder="Known user id" />
-        <datalist id="available-users">
-          {% for user in available_users %}
-          <option value="{{ user.user_id }}">{{ user.interaction_count }} interactions | history {{ user.history_length }}{% if user.last_ordered_at %} | last {{ user.last_ordered_at }}{% endif %}</option>
-          {% endfor %}
-        </datalist>
-      </label>
-      {% if available_users %}
-      <p class="subtle">Search from {{ available_users | length }} trained users with at least three known history items.</p>
-      {% else %}
-      <p class="subtle">No trained user list is available yet. Train and activate a real bundle first.</p>
-      {% endif %}
-      <label>
-        History Items
-        <input type="text" name="history_items" value="{{ history_items }}" placeholder="ASIN1,ASIN2,ASIN3" />
-      </label>
-      <label>
-        Top K
-        <input type="number" min="1" max="50" name="top_k" value="{{ top_k }}" />
-      </label>
-      <button type="submit">Recommend</button>
-    </form>
-    {% if error %}
-    <p class="error">{{ error }}</p>
-    {% endif %}
+
+  <article class="hero-card hero-card-side">
+    <div class="status-stack">
+      <p class="mini-label">Bundle readiness</p>
+      <div class="status-row">
+        <span class="status-pill {% if model_status == 'ready' %}is-ready{% else %}is-alert{% endif %}">
+          {{ model_status | replace("_", " ") }}
+        </span>
+        <span class="source-pill">{{ active_model.source | replace("_", " ") if active_model.source is defined else "n/a" }}</span>
+      </div>
+      <strong class="highlight-version">{{ active_model.version or "No active bundle" }}</strong>
+      <dl class="compact-metadata">
+        <div><dt>Run</dt><dd>{{ active_model.run_name if active_model.run_name is defined else "n/a" }}</dd></div>
+        <div><dt>Profile</dt><dd>{{ active_model.run_profile if active_model.run_profile is defined else "n/a" }}</dd></div>
+        <div><dt>Backend</dt><dd>{{ active_model.model_backend if active_model.model_backend is defined else "n/a" }}</dd></div>
+      </dl>
+    </div>
   </article>
 </section>
 
-<section class="panel">
-  <h2>Recommendations</h2>
+<section class="stats-grid">
+  <article class="stat-card">
+    <span class="stat-label">Searchable Users</span>
+    <strong class="stat-value">{{ available_users | length }}</strong>
+    <span class="stat-note">Loaded from the active bundle for quick QA</span>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Current Results</span>
+    <strong class="stat-value">{{ recommendations | length }}</strong>
+    <span class="stat-note">Recommendation rows currently shown on screen</span>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Metric Files</span>
+    <strong class="stat-value">{{ metric_files | length }}</strong>
+    <span class="stat-note">Offline diagnostics packaged with the active bundle</span>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Retriever Variants</span>
+    <strong class="stat-value">{{ active_model.retriever_variants | length if active_model.retriever_variants is defined else 0 }}</strong>
+    <span class="stat-note">Candidate generators participating in bundle inference</span>
+  </article>
+</section>
+
+{% if error %}
+<div class="alert-banner">{{ error }}</div>
+{% endif %}
+
+<section class="content-grid">
+  <article class="panel panel-query" id="query">
+    <div class="panel-head">
+      <div>
+        <p class="section-kicker">Recommendation Workbench</p>
+        <h2>Query the live bundle</h2>
+      </div>
+      <span class="panel-badge">Top K {{ top_k }}</span>
+    </div>
+
+    <form class="query-form" method="get" action="/" data-enhanced-form>
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">Known user ID</span>
+          <input type="text" name="user_id" value="{{ user_id }}" list="available-users" placeholder="Start typing a trained user id" />
+          <span class="field-help">Use the searchable dropdown or the quick user shortcuts below.</span>
+          <datalist id="available-users">
+            {% for user in available_users %}
+            <option value="{{ user.user_id }}">{{ user.interaction_count }} interactions | history {{ user.history_length }}{% if user.last_ordered_at %} | last {{ user.last_ordered_at }}{% endif %}</option>
+            {% endfor %}
+          </datalist>
+        </label>
+
+        <label class="field">
+          <span class="field-label">History items override</span>
+          <input type="text" name="history_items" value="{{ history_items }}" placeholder="ASIN1,ASIN2,ASIN3" />
+          <span class="field-help">Optional cold-start path. Use this when you want to test ad-hoc item history instead of a known user.</span>
+        </label>
+
+        <label class="field field-compact">
+          <span class="field-label">Top K</span>
+          <input type="number" min="1" max="50" name="top_k" value="{{ top_k }}" />
+          <span class="field-help">Choose how many ranked items to return.</span>
+        </label>
+      </div>
+
+      <div class="quick-pick-block">
+        <span class="field-label">Quick user picks</span>
+        {% if available_users %}
+        <div class="quick-picks">
+          {% for user in available_users[:8] %}
+          <a class="quick-user {% if user.user_id == user_id %}is-selected{% endif %}" data-enhanced-nav href="/?user_id={{ user.user_id }}&top_k={{ top_k }}">
+            {{ user.user_id[:16] }}{% if user.user_id|length > 16 %}...{% endif %}
+          </a>
+          {% endfor %}
+        </div>
+        <p class="field-help">Showing the first {{ available_users[:8] | length }} high-history users as one-click examples.</p>
+        {% else %}
+        <p class="field-help">No trained user list is available yet. Train and activate a real bundle first.</p>
+        {% endif %}
+      </div>
+
+      <div class="query-actions">
+        <button class="button-primary" type="submit">Run Recommendation Query</button>
+        <a class="button-secondary" data-enhanced-nav href="/">Clear Query</a>
+      </div>
+    </form>
+  </article>
+
+  <article class="panel panel-model">
+    <div class="panel-head">
+      <div>
+        <p class="section-kicker">Model Snapshot</p>
+        <h2>Active serving configuration</h2>
+      </div>
+    </div>
+
+    <dl class="metadata metadata-stack">
+      <div><dt>Status</dt><dd>{{ model_status | replace("_", " ") }}</dd></div>
+      <div><dt>Source</dt><dd>{{ active_model.source | replace("_", " ") if active_model.source is defined else "n/a" }}</dd></div>
+      <div><dt>Version</dt><dd>{{ active_model.version or "none" }}</dd></div>
+      <div><dt>Run name</dt><dd>{{ active_model.run_name if active_model.run_name is defined else "n/a" }}</dd></div>
+      <div><dt>Profile</dt><dd>{{ active_model.run_profile if active_model.run_profile is defined else "n/a" }}</dd></div>
+      <div><dt>Backend</dt><dd>{{ active_model.model_backend if active_model.model_backend is defined else "n/a" }}</dd></div>
+    </dl>
+
+    <div class="pill-group">
+      {% if active_model.retriever_variants is defined and active_model.retriever_variants %}
+        {% for variant in active_model.retriever_variants %}
+        <span class="data-pill">{{ variant | replace("_", " ") }}</span>
+        {% endfor %}
+      {% else %}
+        <span class="data-pill is-muted">No retriever variants reported</span>
+      {% endif %}
+    </div>
+
+    <div class="mini-metric-list">
+      <div class="mini-metric">
+        <span>History rows shown</span>
+        <strong>{{ history | length }}</strong>
+      </div>
+      <div class="mini-metric">
+        <span>Metric files</span>
+        <strong>{{ metric_files | length }}</strong>
+      </div>
+      <div class="mini-metric">
+        <span>Selected user</span>
+        <strong>{{ user_id or "ad-hoc query" }}</strong>
+      </div>
+    </div>
+  </article>
+</section>
+
+<section class="panel panel-wide" id="recommendations">
+  <div class="panel-head">
+    <div>
+      <p class="section-kicker">Recommendation Output</p>
+      <h2>Ranked results</h2>
+    </div>
+    <span class="panel-badge">{{ recommendations | length }} rows</span>
+  </div>
+
   {% if recommendations %}
-  <table>
-    <thead>
-      <tr>
-        <th>Item</th>
-        <th>Category</th>
-        <th>Price</th>
-        <th>Rating</th>
-        <th>Sources</th>
-        <th>Score</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for item in recommendations %}
-      <tr>
-        <td>{{ item.item_id }}<span class="subtle">{{ item.title }}</span></td>
-        <td>{{ item.source_category }}</td>
-        <td>{{ item.price }}</td>
-        <td>{{ item.average_rating }}</td>
-        <td>{{ item.candidate_sources or "n/a" }}</td>
-        <td>{{ item.score or item.retrieval_score }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="table-toolbar" data-table-toolbar="recommendations">
+    <label class="toolbar-field">
+      <span class="toolbar-label">Search</span>
+      <input type="text" placeholder="Filter by title, item id, category, or source" data-table-search="recommendations" />
+    </label>
+    <label class="toolbar-field toolbar-field-compact">
+      <span class="toolbar-label">Category</span>
+      <select data-table-select="recommendations" data-filter-key="category">
+        <option value="">All categories</option>
+      </select>
+    </label>
+    <label class="toolbar-field toolbar-field-compact">
+      <span class="toolbar-label">Source</span>
+      <select data-table-select="recommendations" data-filter-key="source">
+        <option value="">All sources</option>
+      </select>
+    </label>
+    <div class="toolbar-summary">
+      <span class="toolbar-count" data-table-count="recommendations">{{ recommendations | length }} shown</span>
+    </div>
+  </div>
+
+  <div class="table-wrap table-wrap-sticky table-wrap-recommendations">
+    <table class="data-table data-table-recommendations" data-filter-table="recommendations">
+      <thead>
+        <tr>
+          <th>Recommended item</th>
+          <th>Category</th>
+          <th class="numeric-column">Price</th>
+          <th class="numeric-column">Rating</th>
+          <th>Candidate sources</th>
+          <th class="numeric-column">Score</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in recommendations %}
+        {% set display_score = item.score if item.score is not none else item.retrieval_score %}
+        <tr
+          data-table-row="recommendations"
+          data-search="{{ ((item.title or item.item_id) ~ ' ' ~ item.item_id ~ ' ' ~ (item.source_category or '') ~ ' ' ~ (item.candidate_sources or '')) | lower }}"
+          data-category="{{ (item.source_category or '') | lower }}"
+          data-source="{{ (item.candidate_sources or '') | lower }}"
+        >
+          <td class="item-cell">
+            <span class="item-title">{{ item.title or item.item_id }}</span>
+            <span class="item-meta">{{ item.item_id }}</span>
+          </td>
+          <td><span class="data-pill">{{ item.source_category | replace("_", " ") }}</span></td>
+          <td class="numeric-column">{{ "$%.2f"|format(item.price) if item.price is not none else "n/a" }}</td>
+          <td class="numeric-column">{{ "%.1f"|format(item.average_rating) if item.average_rating is not none else "n/a" }}</td>
+          <td class="source-cell">{{ item.candidate_sources | replace("+", " + ") if item.candidate_sources else "n/a" }}</td>
+          <td class="numeric-column"><span class="score-chip">{{ "%.3f"|format(display_score) if display_score is not none else "n/a" }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="table-empty-message" data-table-empty="recommendations" hidden>No recommendation rows match the current filters.</div>
   {% else %}
-  <p class="subtle">Submit a user id or comma-separated history items to generate recommendations.</p>
+  <div class="empty-state">
+    <strong>No recommendations on screen yet.</strong>
+    <p>Choose a trained user or provide a comma-separated item history to generate a ranked recommendation set.</p>
+  </div>
   {% endif %}
 </section>
 
-<section class="panel-grid">
-  <article class="panel">
-    <h2>User History</h2>
+<section class="panel-grid panel-grid-secondary">
+  <article class="panel" id="history">
+    <div class="panel-head">
+      <div>
+        <p class="section-kicker">User Inspection</p>
+        <h2>User history</h2>
+      </div>
+    </div>
+
     {% if history %}
-    <table>
-      <thead>
-        <tr>
-          <th>Ordered</th>
-          <th>Item</th>
-          <th>Rating</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for item in history %}
-        <tr>
-          <td>{{ item.ordered_at }}</td>
-          <td>{{ item.item_id }}<span class="subtle">{{ item.title }}</span></td>
-          <td>{{ item.review_rating }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <div class="table-wrap table-wrap-sticky table-wrap-history">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Ordered</th>
+            <th>Item</th>
+            <th class="numeric-column">Rating</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in history %}
+          <tr>
+            <td>{{ item.ordered_at }}</td>
+            <td class="item-cell">
+              <span class="item-title">{{ item.title or item.item_id }}</span>
+              <span class="item-meta">{{ item.item_id }}</span>
+            </td>
+            <td class="numeric-column">{{ "%.1f"|format(item.review_rating) if item.review_rating is not none else "n/a" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
     {% else %}
-    <p class="subtle">History is shown for known user ids backed by the active bundle.</p>
+    <div class="empty-state empty-state-compact">
+      <strong>No user history loaded.</strong>
+      <p>Select a known user to inspect the purchase sequence that powers the recommendation request.</p>
+    </div>
     {% endif %}
   </article>
-  <article class="panel">
-    <h2>Available Users</h2>
+
+  <article class="panel" id="users">
+    <div class="panel-head">
+      <div>
+        <p class="section-kicker">User Explorer</p>
+        <h2>Available trained users</h2>
+      </div>
+    </div>
+
     {% if available_users %}
-    <table>
-      <thead>
-        <tr>
-          <th>User</th>
-          <th>Interactions</th>
-          <th>History</th>
-          <th>Last Seen</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for user in available_users[:12] %}
-        <tr>
-          <td><a href="/?user_id={{ user.user_id }}&top_k={{ top_k }}">{{ user.user_id }}</a></td>
-          <td>{{ user.interaction_count }}</td>
-          <td>{{ user.history_length }}</td>
-          <td>{{ user.last_ordered_at or "n/a" }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    <p class="subtle">These are example trained users that should work for recommendation queries against the active bundle.</p>
-    {% else %}
-    <p class="subtle">Available-user browsing appears after a real bundle is active.</p>
+    <div class="table-toolbar" data-table-toolbar="users">
+      <label class="toolbar-field">
+        <span class="toolbar-label">Search</span>
+        <input type="text" placeholder="Filter by user id" data-table-search="users" />
+      </label>
+      <label class="toolbar-field toolbar-field-compact">
+        <span class="toolbar-label">Min interactions</span>
+        <input type="number" min="0" step="1" value="0" data-table-min="users" data-filter-key="interactions" />
+      </label>
+      <label class="toolbar-field toolbar-field-compact">
+        <span class="toolbar-label">Min history</span>
+        <input type="number" min="0" step="1" value="0" data-table-min="users" data-filter-key="history" />
+      </label>
+      <div class="toolbar-summary">
+        <span class="toolbar-count" data-table-count="users">{{ available_users | length }} shown</span>
+      </div>
+    </div>
+
+    <div class="table-wrap table-wrap-sticky table-wrap-users">
+      <table class="data-table" data-filter-table="users">
+        <thead>
+          <tr>
+            <th>User</th>
+            <th class="numeric-column">Interactions</th>
+            <th class="numeric-column">History</th>
+            <th>Last seen</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for user in available_users %}
+          <tr
+            data-table-row="users"
+            data-search="{{ user.user_id | lower }}"
+            data-interactions="{{ user.interaction_count }}"
+            data-history="{{ user.history_length }}"
+          >
+            <td><a class="table-link" data-enhanced-nav href="/?user_id={{ user.user_id }}&top_k={{ top_k }}">{{ user.user_id }}</a></td>
+            <td class="numeric-column">{{ user.interaction_count }}</td>
+            <td class="numeric-column">{{ user.history_length }}</td>
+            <td>{{ user.last_ordered_at or "n/a" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="table-empty-message" data-table-empty="users" hidden>No users match the current explorer filters.</div>
+  {% else %}
+    <div class="empty-state empty-state-compact">
+      <strong>No trained users exposed yet.</strong>
+      <p>Activate a real bundle to populate the searchable user list and the quick user explorer.</p>
+    </div>
     {% endif %}
   </article>
-  <article class="panel">
-    <h2>Evaluation Summary</h2>
-    <p class="subtle">Metric files tracked in the active bundle: {{ evaluation_summary.metric_files | length if evaluation_summary.metric_files is defined else 0 }}</p>
-    {% if evaluation_summary.metric_files is defined and evaluation_summary.metric_files %}
-    <ul class="metric-list">
-      {% for metric_file in evaluation_summary.metric_files %}
-      <li>{{ metric_file.file }} ({{ metric_file.rows }} rows)</li>
+
+  <article class="panel" id="evaluation">
+    <div class="panel-head">
+      <div>
+        <p class="section-kicker">Offline Diagnostics</p>
+        <h2>Evaluation summary</h2>
+      </div>
+    </div>
+
+    {% if metric_files %}
+    <div class="metric-cards">
+      {% for metric_file in metric_files %}
+      <div class="metric-card">
+        <strong>{{ metric_file.file }}</strong>
+        <span>{{ metric_file.rows }} rows tracked in the active bundle</span>
+      </div>
       {% endfor %}
-    </ul>
+    </div>
     {% else %}
-    <p class="subtle">No bundle metrics are active yet.</p>
+    <div class="empty-state empty-state-compact">
+      <strong>No evaluation files are active.</strong>
+      <p>Export a trained bundle with evaluation artifacts to surface retrieval and ranking diagnostics here.</p>
+    </div>
     {% endif %}
   </article>
 </section>

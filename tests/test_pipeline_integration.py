@@ -37,7 +37,7 @@ def test_training_bundle_round_trip(test_container) -> None:
     api_response = client.post("/recommend", json={"user_id": "u1", "top_k": 2})
     active_response = client.get("/models/active")
     users_response = client.get("/users", params={"limit": 5, "min_history": 3})
-    page_response = client.get("/")
+    page_response = client.get("/?user_id=u1&top_k=2")
 
     assert api_response.status_code == 200
     assert active_response.status_code == 200
@@ -46,3 +46,5 @@ def test_training_bundle_round_trip(test_container) -> None:
     assert users_response.json()["items"][0]["user_id"] in {"u1", "u2", "u3", "u4"}
     assert active_response.json()["version"] == "fixture-bundle"
     assert "available-users" in page_response.text
+    assert 'data-filter-table="recommendations"' in page_response.text
+    assert 'data-filter-table="users"' in page_response.text

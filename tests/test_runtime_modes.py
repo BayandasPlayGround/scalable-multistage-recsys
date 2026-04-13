@@ -28,9 +28,11 @@ def test_local_dev_mode_uses_mock_bundle(mock_settings) -> None:
 def test_production_mode_requires_real_bundle(production_settings) -> None:
     pre_client = TestClient(create_app(production_settings))
     pre_ready = pre_client.get("/ready")
+    pre_shutdown = pre_client.post("/local/shutdown")
 
     assert pre_ready.status_code == 503
     assert pre_ready.json()["ready"] is False
+    assert pre_shutdown.status_code == 403
 
     container = build_container(production_settings)
     session = container.training_pipeline.run(force_rebuild=True)

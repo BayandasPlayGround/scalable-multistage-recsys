@@ -4,20 +4,53 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "Amazon RecSys Platform" }}</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='/favicon.svg') }}" />
+    <link rel="shortcut icon" href="{{ url_for('static', path='/favicon.svg') }}" />
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}" />
+    <script defer src="{{ url_for('static', path='/app.js') }}"></script>
   </head>
   <body>
-    <div class="page-shell">
-      <header class="hero">
-        <p class="eyebrow">Azure-First Recommender Platform</p>
-        <h1>Amazon RecSys</h1>
-        <p class="hero-copy">
-          Batch-trained recommendation bundles, served through a modular FastAPI app.
-        </p>
-      </header>
-      <main>
-        {% block content %}{% endblock %}
-      </main>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div class="brand-copy">
+            <p class="brand-kicker">Advanced Analytics</p>
+            <strong>Amazon RecSys Hub</strong>
+            <span>Corporate recommendation operations workspace</span>
+          </div>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="Workspace">
+          <a class="nav-item" href="#overview"><span class="nav-dot"></span><span>Overview</span></a>
+          <a class="nav-item" href="#query"><span class="nav-dot"></span><span>Recommendation Workbench</span></a>
+          <a class="nav-item" href="#recommendations"><span class="nav-dot"></span><span>Recommendations</span></a>
+          <a class="nav-item" href="#history"><span class="nav-dot"></span><span>User History</span></a>
+          <a class="nav-item" href="#users"><span class="nav-dot"></span><span>User Explorer</span></a>
+          <a class="nav-item" href="#evaluation"><span class="nav-dot"></span><span>Evaluation</span></a>
+          <a class="nav-item" href="/docs"><span class="nav-dot"></span><span>API Docs</span></a>
+        </nav>
+
+        <div class="sidebar-footnote">
+          <p>Bundle health, recommendation QA, and user-level inspection in one interface.</p>
+          {% if can_shutdown_local_server %}
+          <button class="sidebar-shutdown-button" type="button" data-local-shutdown>
+            Shutdown Local Server
+          </button>
+          <p class="sidebar-footnote-note">Available on localhost sessions and the local environment.</p>
+          {% endif %}
+        </div>
+      </aside>
+
+      <div class="workspace-shell">
+        <main class="workspace-main">
+          {% block content %}{% endblock %}
+        </main>
+      </div>
     </div>
   </body>
 </html>
