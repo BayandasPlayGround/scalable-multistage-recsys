@@ -64,6 +64,18 @@ class HistoryResponse(BaseModel):
     items: list[HistoryItemResponse]
 
 
+class AvailableUserResponse(BaseModel):
+    user_id: str
+    interaction_count: int
+    history_length: int
+    last_ordered_at: str | None = None
+
+
+class AvailableUsersResponse(BaseModel):
+    total: int
+    items: list[AvailableUserResponse]
+
+
 class ConfigResponse(BaseModel):
     config: dict[str, Any]
 

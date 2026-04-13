@@ -112,6 +112,10 @@ td {
   vertical-align: top;
 }
 
+a {
+  color: var(--accent-dark);
+}
+
 .subtle {
   display: block;
   font-size: 0.9rem;

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from amazon_recsys.config.settings import AppSettings
-from amazon_recsys.domain.entities import BundleManifest, HistoryItem, RecommendationItem, RuntimeBundle, utcnow_iso
+from amazon_recsys.domain.entities import AvailableUser, BundleManifest, HistoryItem, RecommendationItem, RuntimeBundle, utcnow_iso
 from amazon_recsys.infrastructure.artifacts import LocalArtifactStore
 from amazon_recsys.ml import core
 
@@ -186,6 +186,84 @@ class BundleRecommendationService:
             )
             for row in history.to_dict(orient="records")
         ]
+
+    def list_available_users(
+        self,
+        *,
+        limit: int = 100,
+        min_history: int = 1,
+        query: str | None = None,
+    ) -> list[AvailableUser]:
+        bundle = self._load_bundle()
+        if bundle.is_mock:
+            return []
+
+        examples = bundle.split_artifacts.test_examples.copy()
+        if examples.empty:
+            return []
+
+        examples["user_id"] = examples["user_id"].astype(str)
+        examples["history_length"] = examples["history_length"].astype(int)
+        examples = examples[examples["history_length"] >= int(min_history)].copy()
+        if examples.empty:
+            return []
+
+        interactions = bundle.prepared.interactions.copy()
+        interactions["user_id"] = interactions["user_id"].astype(str)
+
+        interaction_counts = (
+            interactions.groupby("user_id", as_index=False)
+            .size()
+            .rename(columns={"size": "interaction_count"})
+        )
+        if "timestamp_dt" in interactions.columns:
+            last_orders = (
+                interactions.groupby("user_id", as_index=False)["timestamp_dt"]
+                .max()
+                .rename(columns={"timestamp_dt": "last_ordered_at"})
+            )
+        else:
+            last_orders = interactions.groupby("user_id", as_index=False)["timestamp"].max()
+            last_orders["last_ordered_at"] = last_orders["timestamp"].astype(str)
+            last_orders = last_orders.drop(columns=["timestamp"])
+
+        summary = (
+            examples.groupby("user_id", as_index=False)["history_length"]
+            .max()
+            .merge(interaction_counts, on="user_id", how="left")
+            .merge(last_orders, on="user_id", how="left")
+        )
+        summary["interaction_count"] = summary["interaction_count"].fillna(0).astype(int)
+        if query:
+            needle = query.strip().lower()
+            if needle:
+                summary = summary[summary["user_id"].str.lower().str.contains(needle, regex=False)].copy()
+        if summary.empty:
+            return []
+
+        summary = summary.sort_values(
+            ["interaction_count", "history_length", "user_id"],
+            ascending=[False, False, True],
+        ).head(limit)
+
+        available_users: list[AvailableUser] = []
+        for row in summary.to_dict(orient="records"):
+            last_ordered = row.get("last_ordered_at")
+            if hasattr(last_ordered, "strftime"):
+                last_ordered_value = last_ordered.strftime("%Y-%m-%d")
+            elif last_ordered is None:
+                last_ordered_value = None
+            else:
+                last_ordered_value = str(last_ordered)
+            available_users.append(
+                AvailableUser(
+                    user_id=str(row["user_id"]),
+                    interaction_count=int(row["interaction_count"]),
+                    history_length=int(row["history_length"]),
+                    last_ordered_at=last_ordered_value,
+                )
+            )
+        return available_users
 
     def get_active_model(self) -> dict[str, Any]:
         bundle = self._load_bundle()

@@ -33,17 +33,23 @@ def index(
     recommendations = []
     history = []
     error = None
+    active_model = service.readiness()
+    evaluation_summary = {}
+    available_users = []
     try:
         active_model = service.get_active_model()
         evaluation_summary = service.get_evaluation_summary()
-        if user_id or parsed_history:
+        available_users = service.list_available_users(limit=250, min_history=3)
+    except Exception as exc:
+        error = str(exc)
+
+    if user_id or parsed_history:
+        try:
             recommendations = service.recommend(user_id=user_id, history_items=parsed_history, top_k=top_k)
             if user_id:
                 history = service.get_user_history(user_id)
-    except Exception as exc:
-        active_model = service.readiness()
-        evaluation_summary = {}
-        error = str(exc)
+        except Exception as exc:
+            error = str(exc)
     return TEMPLATES.TemplateResponse(
         request=request,
         name="index.html",
@@ -52,6 +58,7 @@ def index(
             "evaluation_summary": evaluation_summary,
             "recommendations": recommendations,
             "history": history,
+            "available_users": available_users,
             "user_id": user_id or "",
             "history_items": history_items or "",
             "top_k": top_k,

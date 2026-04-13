@@ -78,6 +78,14 @@ class HistoryItem:
     average_rating: float | None
 
 
+@dataclass(slots=True)
+class AvailableUser:
+    user_id: str
+    interaction_count: int
+    history_length: int
+    last_ordered_at: str | None = None
+
+
 @dataclass
 class RuntimeBundle:
     manifest: BundleManifest

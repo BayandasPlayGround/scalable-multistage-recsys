@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from amazon_recsys.domain.entities import ActiveBundlePointer, BundleManifest, HistoryItem, RecommendationItem, RuntimeBundle
+from amazon_recsys.domain.entities import (
+    ActiveBundlePointer,
+    AvailableUser,
+    BundleManifest,
+    HistoryItem,
+    RecommendationItem,
+    RuntimeBundle,
+)
 
 
 class ArtifactStore(Protocol):
@@ -31,6 +38,14 @@ class RecommendationService(Protocol):
     ) -> list[RecommendationItem]: ...
 
     def get_user_history(self, user_id: str, limit: int = 15) -> list[HistoryItem]: ...
+
+    def list_available_users(
+        self,
+        *,
+        limit: int = 100,
+        min_history: int = 1,
+        query: str | None = None,
+    ) -> list[AvailableUser]: ...
 
     def get_active_model(self) -> dict[str, object]: ...
 

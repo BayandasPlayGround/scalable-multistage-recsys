@@ -263,6 +263,7 @@ The app shape includes routes such as:
 - `/health`
 - `/ready`
 - `/config`
+- `/users`
 - `/recommend`
 - `/users/{user_id}/history`
 - `/models/active`
@@ -273,6 +274,7 @@ The app shape includes routes such as:
 The Jinja-based UI is intended to support:
 
 - user lookup
+- searchable trained-user selection
 - prior-order inspection
 - recommendation display
 - candidate provenance display

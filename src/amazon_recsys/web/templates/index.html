@@ -16,8 +16,18 @@
     <form class="query-form" method="get" action="/">
       <label>
         User ID
-        <input type="text" name="user_id" value="{{ user_id }}" placeholder="Known user id" />
+        <input type="text" name="user_id" value="{{ user_id }}" list="available-users" placeholder="Known user id" />
+        <datalist id="available-users">
+          {% for user in available_users %}
+          <option value="{{ user.user_id }}">{{ user.interaction_count }} interactions | history {{ user.history_length }}{% if user.last_ordered_at %} | last {{ user.last_ordered_at }}{% endif %}</option>
+          {% endfor %}
+        </datalist>
       </label>
+      {% if available_users %}
+      <p class="subtle">Search from {{ available_users | length }} trained users with at least three known history items.</p>
+      {% else %}
+      <p class="subtle">No trained user list is available yet. Train and activate a real bundle first.</p>
+      {% endif %}
       <label>
         History Items
         <input type="text" name="history_items" value="{{ history_items }}" placeholder="ASIN1,ASIN2,ASIN3" />
@@ -90,6 +100,34 @@
     </table>
     {% else %}
     <p class="subtle">History is shown for known user ids backed by the active bundle.</p>
+    {% endif %}
+  </article>
+  <article class="panel">
+    <h2>Available Users</h2>
+    {% if available_users %}
+    <table>
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Interactions</th>
+          <th>History</th>
+          <th>Last Seen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for user in available_users[:12] %}
+        <tr>
+          <td><a href="/?user_id={{ user.user_id }}&top_k={{ top_k }}">{{ user.user_id }}</a></td>
+          <td>{{ user.interaction_count }}</td>
+          <td>{{ user.history_length }}</td>
+          <td>{{ user.last_ordered_at or "n/a" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="subtle">These are example trained users that should work for recommendation queries against the active bundle.</p>
+    {% else %}
+    <p class="subtle">Available-user browsing appears after a real bundle is active.</p>
     {% endif %}
   </article>
   <article class="panel">

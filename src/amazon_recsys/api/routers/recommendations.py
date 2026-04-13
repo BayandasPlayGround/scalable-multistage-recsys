@@ -4,6 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from amazon_recsys.api.dependencies import get_recommendation_service
 from amazon_recsys.api.schemas import (
+    AvailableUserResponse,
+    AvailableUsersResponse,
     HistoryItemResponse,
     HistoryResponse,
     RecommendationItemResponse,
@@ -14,6 +16,23 @@ from amazon_recsys.application.services import BundleRecommendationService
 
 
 router = APIRouter(tags=["recommendations"])
+
+
+@router.get("/users", response_model=AvailableUsersResponse)
+def available_users(
+    limit: int = 100,
+    min_history: int = 1,
+    query: str | None = None,
+    service: BundleRecommendationService = Depends(get_recommendation_service),
+) -> AvailableUsersResponse:
+    try:
+        items = service.list_available_users(limit=limit, min_history=min_history, query=query)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return AvailableUsersResponse(
+        total=len(items),
+        items=[AvailableUserResponse(**asdict(item)) for item in items],
+    )
 
 
 @router.post("/recommend", response_model=RecommendationResponse)

@@ -15,6 +15,7 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     ready_response = client.get("/ready")
     config_response = client.get("/config")
     model_response = client.get("/models/active")
+    users_response = client.get("/users")
     recommend_response = client.post("/recommend", json={"history_items": ["A1", "A2"], "top_k": 3})
     page_response = client.get("/")
 
@@ -22,10 +23,13 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     assert ready_response.status_code == 200
     assert config_response.status_code == 200
     assert model_response.status_code == 200
+    assert users_response.status_code == 200
     assert recommend_response.status_code == 200
     assert page_response.status_code == 200
 
     payload = recommend_response.json()
     assert payload["source"] == "mock"
     assert len(payload["items"]) == 3
+    assert users_response.json()["items"] == []
     assert "Amazon RecSys" in page_response.text
+    assert "available-users" in page_response.text
