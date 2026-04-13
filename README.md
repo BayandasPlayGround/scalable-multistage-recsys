@@ -15,6 +15,47 @@ The notebook-facing entrypoint:
 
 is now a compatibility layer that re-exports the package implementation.
 
+## Table of Contents
+
+- [Moving from the research environment into the production environment](#moving-from-the-research-environment-into-the-production-environment)
+- [The Two Working Modes](#the-two-working-modes)
+- [Notebook / research mode](#notebook--research-mode)
+- [Production scaffold mode](#production-scaffold-mode)
+- [Current ML Architecture](#current-ml-architecture)
+- [Retrieval / candidate generation](#retrieval--candidate-generation)
+- [Ranking](#ranking)
+- [Data framing](#data-framing)
+- [Current Software Architecture](#current-software-architecture)
+- [Repository Map](#repository-map)
+- [`template.py`](#templatepy)
+- [FastAPI + Jinja App Layer](#fastapi--jinja-app-layer)
+- [API direction](#api-direction)
+- [Frontend direction](#frontend-direction)
+- [Azure-First Structure](#azure-first-structure)
+- [Configuration Story](#configuration-story)
+- [Core ML configuration](#core-ml-configuration)
+- [Application/runtime configuration](#applicationruntime-configuration)
+- [How To Work With The Repo](#how-to-work-with-the-repo)
+- [If you are doing ML experimentation](#if-you-are-doing-ml-experimentation)
+- [If you are doing application work](#if-you-are-doing-application-work)
+- [If you are doing infrastructure work](#if-you-are-doing-infrastructure-work)
+- [Quick Start](#quick-start)
+- [Install runtime dependencies](#install-runtime-dependencies)
+- [Install the package in editable mode](#install-the-package-in-editable-mode)
+- [Install with dev extras](#install-with-dev-extras)
+- [Run the notebook workflow](#run-the-notebook-workflow)
+- [Run the scaffolded app](#run-the-scaffolded-app)
+- [Run tests](#run-tests)
+- [Export and activate a local bundle](#export-and-activate-a-local-bundle)
+- [Migration Status](#migration-status)
+- [Already real](#already-real)
+- [Still evolving](#still-evolving)
+- [Recommended Mental Model](#recommended-mental-model)
+- [Local Dev Vs Production-Like Runbook](#local-dev-vs-production-like-runbook)
+- [Local dev mode](#local-dev-mode)
+- [Production-like local mode](#production-like-local-mode)
+- [Verification Matrix](#verification-matrix)
+
 ## Moving from the research environment into the production environment
 
 The earlier research environment was mostly:
