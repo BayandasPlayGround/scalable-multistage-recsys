@@ -47,6 +47,11 @@ is now a compatibility layer that re-exports the package implementation.
 - [Run the scaffolded app](#run-the-scaffolded-app)
 - [Run tests](#run-tests)
 - [Export and activate a local bundle](#export-and-activate-a-local-bundle)
+- [Beginner Command Walkthrough](#beginner-command-walkthrough)
+- [Step 1: Install the project in editable dev mode](#step-1-install-the-project-in-editable-dev-mode)
+- [Step 2: Create your local `.env` file](#step-2-create-your-local-env-file)
+- [Step 3: Train, export, and activate a serving bundle](#step-3-train-export-and-activate-a-serving-bundle)
+- [Step 4: Start the API and web app](#step-4-start-the-api-and-web-app)
 - [Migration Status](#migration-status)
 - [Already real](#already-real)
 - [Still evolving](#still-evolving)
@@ -419,6 +424,178 @@ pytest
 ```bash
 python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
 ```
+
+## Beginner Command Walkthrough
+
+If you want the shortest real workflow, these are the main commands:
+
+```powershell
+pip install -e .[dev]
+Copy-Item .env.example .env -Force
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+python -m amazon_recsys.cli.main serve
+```
+
+This is what each one means in plain English.
+
+### Step 1: Install the project in editable dev mode
+
+```powershell
+pip install -e .[dev]
+```
+
+What this command means:
+
+- `pip install` tells Python to install the project.
+- `.` means "install the project in the current folder".
+- `-e` means editable mode.
+- editable mode means when you change the code in this repo, Python uses those live changes without you reinstalling every time.
+- `[dev]` means "also install the development extras", such as test and tooling dependencies.
+
+Why you need it:
+
+- without this, the `amazon_recsys` package may not be importable from the command line
+- the CLI command `python -m amazon_recsys.cli.main ...` depends on the package being installed
+- the tests also depend on the dev extras
+
+What to expect:
+
+- Python downloads or resolves dependencies
+- the package becomes available in your shell
+- after this, the CLI commands in this README should work
+
+### Step 2: Create your local `.env` file
+
+```powershell
+Copy-Item .env.example .env -Force
+```
+
+What this command means:
+
+- it copies the template environment file into a real local `.env` file
+- `.env.example` is the safe template kept in source control
+- `.env` is your local runtime configuration file
+- `-Force` means overwrite an existing `.env` file with the template copy
+
+Why you need it:
+
+- the app loads configuration from `.env`
+- this is where host, port, data paths, artifact paths, and training defaults come from
+- it gives you a working starting configuration without hand-writing settings
+
+Important default values from `.env.example`:
+
+- `AMAZON_RECSYS_ENVIRONMENT=local`
+- `AMAZON_RECSYS_RUN_PROFILE=debug`
+- `AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING=true`
+- `AMAZON_RECSYS_RANKER_BACKEND=xgboost`
+
+What to expect:
+
+- a new `.env` file appears in the repo root
+- the app and CLI will read from that file on the next command
+
+### Step 3: Train, export, and activate a serving bundle
+
+```powershell
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+```
+
+Yes: training happens here.
+
+This command does not only export a bundle. It first runs the training pipeline, then saves the result as a serving bundle, then optionally activates it.
+
+What each part means:
+
+- `python -m amazon_recsys.cli.main` runs the package CLI module
+- `export-bundle` tells the CLI to create a versioned serving bundle
+- `--run-name debug-local` gives this training run a readable name inside `artifacts/`
+- `--run-profile debug` uses the smaller debug configuration rather than a larger quality or full run
+- `--activate` marks the new bundle as the active one for online serving
+
+What actually happens under the hood:
+
+- the CLI loads settings from `.env`
+- it builds the dependency container
+- it runs the training pipeline
+- the training pipeline prepares the corpus
+- it builds train, validation, and test splits
+- it trains the retrievers
+- it trains the ranker
+- it saves a bundle under `artifacts/amazon_recsys/bundles/`
+- it writes or updates `artifacts/production/active_bundle.json`
+
+Why this is the most important command:
+
+- it is the command that turns your raw data and configuration into something the API can actually serve
+- if you skip this and you do not allow mock mode, the app will have nothing real to load
+
+What files and folders it depends on:
+
+- your dataset should exist in either `amazon_review_data/` or `notebooks/amazon_review_data/`
+- your runtime settings come from `.env`
+
+What to expect:
+
+- the command may take a while depending on data size
+- you should see JSON output describing the created bundle
+- after it finishes, there should be bundle files under `artifacts/amazon_recsys/bundles/`
+- the app is now able to serve a real active bundle
+
+If you want only training without bundle export:
+
+```powershell
+python -m amazon_recsys.cli.main train --run-name debug-local --run-profile debug
+```
+
+That trains the model artifacts, but it does not package and activate a serving bundle.
+
+### Step 4: Start the API and web app
+
+```powershell
+python -m amazon_recsys.cli.main serve
+```
+
+What this command means:
+
+- it starts the FastAPI application
+- it loads the app settings
+- it builds the service container
+- it serves the API and Jinja web pages on the configured host and port
+
+What it tries to load:
+
+- first choice: the active real bundle from `artifacts/production/active_bundle.json`
+- fallback in local mode: a mock bundle, if `AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING=true`
+
+Why bundle activation matters:
+
+- if you ran `export-bundle ... --activate`, the app should load the real trained bundle
+- if you did not activate a bundle and mock mode is disabled, readiness should fail
+
+What to expect:
+
+- the server starts on the host and port from `.env`
+- by default that is `http://127.0.0.1:8000/` or `http://localhost:8000/`
+- the API docs are at `/docs`
+- the health endpoint is at `/health`
+- the readiness endpoint is at `/ready`
+
+Typical first-run sequence:
+
+```powershell
+pip install -e .[dev]
+Copy-Item .env.example .env -Force
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+python -m amazon_recsys.cli.main serve
+```
+
+Open these pages after the server starts:
+
+- `http://127.0.0.1:8000/`
+- `http://127.0.0.1:8000/docs`
+- `http://127.0.0.1:8000/health`
+- `http://127.0.0.1:8000/ready`
 
 ## Migration Status
 

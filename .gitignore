@@ -6,6 +6,7 @@ __pycache__/
 # Additioinal paths
 **/amazon_review_data
 notebooks/amazon_review_data
+artifacts/
 
 # C extensions
 *.so
