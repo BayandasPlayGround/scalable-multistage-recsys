@@ -8,6 +8,7 @@ import pandas as pd
 
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.ml import core
+from amazon_recsys.observability.mlflow import MLflowTracker
 
 
 def _metric_preview(csv_path: Path) -> dict[str, Any]:
@@ -38,11 +39,15 @@ class TrainingSession:
     retrievers: dict[str, Any]
     ranker: Any
     evaluation_summary: dict[str, Any]
+    mlflow_run_id: str | None = None
+    mlflow_experiment_name: str | None = None
+    mlflow_tracking_uri: str | None = None
 
 
 class PackageTrainingPipeline:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
+        self.mlflow_tracker = MLflowTracker(settings)
 
     def build_pipeline_config(self) -> Any:
         config = core.PipelineConfig(
@@ -85,7 +90,7 @@ class PackageTrainingPipeline:
         retrievers = core.train_retrievers(prepared, split_artifacts)
         ranker = core.train_ranker(prepared, split_artifacts, retrievers, backend=config.ranker_backend)
         evaluation_summary = collect_evaluation_summary(config)
-        return TrainingSession(
+        session = TrainingSession(
             settings=self.settings,
             pipeline_config=config,
             prepared=prepared,
@@ -94,14 +99,32 @@ class PackageTrainingPipeline:
             ranker=ranker,
             evaluation_summary=evaluation_summary,
         )
+        tracking_metadata = self.mlflow_tracker.log_training_session(session)
+        if tracking_metadata is not None:
+            session.mlflow_run_id = tracking_metadata["run_id"]
+            session.mlflow_experiment_name = tracking_metadata["experiment_name"]
+            session.mlflow_tracking_uri = tracking_metadata["tracking_uri"]
+        return session
 
     def evaluate(self, force_rebuild: bool = False) -> dict[str, Any]:
         config = self.build_pipeline_config()
         eval_dir = Path(config.eval_dir)
         if not eval_dir.exists() or not any(eval_dir.glob("*_metrics.csv")):
             session = self.run(force_rebuild=force_rebuild)
-            return session.evaluation_summary
-        return collect_evaluation_summary(config)
+            summary = dict(session.evaluation_summary)
+            if session.mlflow_run_id is not None:
+                summary["mlflow"] = {
+                    "run_id": session.mlflow_run_id,
+                    "experiment_name": session.mlflow_experiment_name,
+                    "tracking_uri": session.mlflow_tracking_uri,
+                }
+            return summary
+        summary = collect_evaluation_summary(config)
+        tracking_metadata = self.mlflow_tracker.log_evaluation_summary(config, summary)
+        if tracking_metadata is not None:
+            summary = dict(summary)
+            summary["mlflow"] = tracking_metadata
+        return summary
 
 
 LegacyTrainingSession = TrainingSession

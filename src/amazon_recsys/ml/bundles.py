@@ -39,6 +39,10 @@ def build_bundle_manifest(
             "workspace_root": str(settings.workspace_root),
             "legacy_workspace_root": str(settings.legacy_workspace_root),
             "legacy_artifact_root": str(settings.legacy_artifact_root),
+            "mlflow_tracking_enabled": bool(getattr(session, "mlflow_run_id", None)),
+            "mlflow_tracking_uri": getattr(session, "mlflow_tracking_uri", None),
+            "mlflow_experiment_name": getattr(session, "mlflow_experiment_name", None),
+            "mlflow_run_id": getattr(session, "mlflow_run_id", None),
         },
     )
 

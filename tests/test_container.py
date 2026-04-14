@@ -51,6 +51,16 @@ def test_artifact_store_can_activate_manifest(workspace_dir: Path) -> None:
     assert active_manifest.version == "v1"
 
 
+@pytest.mark.config
+def test_settings_resolve_local_mlflow_defaults(workspace_dir: Path) -> None:
+    settings = AppSettings(workspace_root=workspace_dir, mlflow_enabled=True)
+
+    assert settings.mlflow.enabled is True
+    assert settings.mlflow.backend_root == (workspace_dir / "mlflow_runs").resolve()
+    assert settings.mlflow.tracking_uri.endswith("mlflow_runs")
+    assert settings.safe_config()["mlflow"]["enabled"] is True
+
+
 @pytest.mark.foundation
 def test_build_container_wires_services(mock_settings: AppSettings) -> None:
     container = build_container(mock_settings)

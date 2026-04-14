@@ -104,6 +104,14 @@ class ServingConfig(BaseModel):
     use_mock_bundle_if_missing: bool = True
 
 
+class MLflowConfig(BaseModel):
+    enabled: bool = False
+    tracking_uri: str
+    experiment_name: str = "amazon-recsys"
+    backend_root: Path
+    run_name_prefix: str = ""
+
+
 class AzureConfig(BaseModel):
     subscription_id: str = ""
     resource_group: str = "rg-amazon-recsys"
@@ -139,6 +147,11 @@ class AppSettings(BaseSettings):
     active_bundle_path: Path = Path("artifacts/production/active_bundle.json")
     default_top_k: int = 7
     use_mock_bundle_if_missing: bool = True
+    mlflow_enabled: bool = False
+    mlflow_tracking_uri: str = ""
+    mlflow_experiment_name: str = "amazon-recsys"
+    mlflow_backend_root: Path = Path("mlflow_runs")
+    mlflow_run_name_prefix: str = ""
 
     run_name: str = "default"
     run_profile: str = "debug"
@@ -248,6 +261,26 @@ class AppSettings(BaseSettings):
         return self._resolve_relative_path(Path(self.active_bundle_path))
 
     @property
+    def resolved_mlflow_backend_root(self) -> Path:
+        return self._resolve_relative_path(Path(self.mlflow_backend_root))
+
+    @property
+    def resolved_mlflow_tracking_uri(self) -> str:
+        raw = str(self.mlflow_tracking_uri).strip()
+        if not raw:
+            backend_root = self.resolved_mlflow_backend_root.resolve()
+            try:
+                return str(backend_root.relative_to(Path.cwd().resolve()))
+            except ValueError:
+                return backend_root.as_uri()
+        if "://" in raw or raw in {"databricks", "uc"}:
+            return raw
+        candidate = Path(raw)
+        if candidate.is_absolute():
+            return candidate.resolve().as_uri()
+        return raw
+
+    @property
     def legacy_artifact_root(self) -> Path:
         return (self.legacy_workspace_root / "artifacts" / "amazon_recsys" / self.run_name).resolve()
 
@@ -313,6 +346,16 @@ class AppSettings(BaseSettings):
         )
 
     @property
+    def mlflow(self) -> MLflowConfig:
+        return MLflowConfig(
+            enabled=self.mlflow_enabled,
+            tracking_uri=self.resolved_mlflow_tracking_uri,
+            experiment_name=self.mlflow_experiment_name,
+            backend_root=self.resolved_mlflow_backend_root,
+            run_name_prefix=self.mlflow_run_name_prefix,
+        )
+
+    @property
     def azure(self) -> AzureConfig:
         return AzureConfig(
             subscription_id=self.azure_subscription_id,
@@ -326,6 +369,7 @@ class AppSettings(BaseSettings):
         self.resolved_artifact_root.mkdir(parents=True, exist_ok=True)
         self.resolved_bundle_root.mkdir(parents=True, exist_ok=True)
         self.resolved_active_bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        self.resolved_mlflow_backend_root.mkdir(parents=True, exist_ok=True)
 
     def safe_config(self) -> dict[str, Any]:
         return {
@@ -340,6 +384,7 @@ class AppSettings(BaseSettings):
             "retrieval": self.retrieval.model_dump(mode="json"),
             "ranking": self.ranking.model_dump(mode="json"),
             "serving": self.serving.model_dump(mode="json"),
+            "mlflow": self.mlflow.model_dump(mode="json"),
             "azure": self.azure.model_dump(mode="json"),
             "legacy_artifact_root": str(self.legacy_artifact_root),
         }

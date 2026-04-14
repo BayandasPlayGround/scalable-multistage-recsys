@@ -5,6 +5,11 @@ This repository now supports two valid ways of working:
 - a **package-first production workflow** under `src/amazon_recsys/`
 - a **notebook workflow** that consumes the package-owned ML core
 
+If you are specifically looking for experiment tracking setup, jump to:
+
+- [MLflow Tracking](#mlflow-tracking)
+- [MLflow Quick Start](#mlflow-quick-start)
+
 The recommender engine now lives in:
 
 - `src/amazon_recsys/ml/core.py`
@@ -35,6 +40,12 @@ is now a compatibility layer that re-exports the package implementation.
 - [Configuration Story](#configuration-story)
 - [Core ML configuration](#core-ml-configuration)
 - [Application/runtime configuration](#applicationruntime-configuration)
+- [MLflow Tracking](#mlflow-tracking)
+- [MLflow Quick Start](#mlflow-quick-start)
+- [Local MLflow exact commands](#local-mlflow-exact-commands)
+- [Production MLflow exact commands](#production-mlflow-exact-commands)
+- [Local MLflow mode](#local-mlflow-mode)
+- [Production MLflow mode](#production-mlflow-mode)
 - [How To Work With The Repo](#how-to-work-with-the-repo)
 - [If you are doing ML experimentation](#if-you-are-doing-ml-experimentation)
 - [If you are doing application work](#if-you-are-doing-application-work)
@@ -329,11 +340,187 @@ The intended split is:
 - `RetrievalConfig`
 - `RankingConfig`
 - `ServingConfig`
+- `MLflowConfig`
 - `AzureConfig`
 
 Environment-driven values are documented in:
 
 - `.env.example`
+
+## MLflow Tracking
+
+MLflow is now integrated into the package-first training workflow.
+
+If you only want the shortest usable commands, go straight to:
+
+- [MLflow Quick Start](#mlflow-quick-start)
+
+When MLflow is enabled, the training pipeline logs:
+
+- the resolved runtime configuration
+- dataset and split counts
+- evaluation metrics from the offline metric CSV files
+- the generated evaluation artifacts
+- the exported bundle files and bundle lineage metadata
+
+This means one MLflow run can now tell you:
+
+- which settings produced a bundle
+- which evaluation metrics were recorded
+- which bundle version was exported from that run
+
+The relevant environment variables are:
+
+- `AMAZON_RECSYS_MLFLOW_ENABLED`
+- `AMAZON_RECSYS_MLFLOW_TRACKING_URI`
+- `AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME`
+- `AMAZON_RECSYS_MLFLOW_BACKEND_ROOT`
+- `AMAZON_RECSYS_MLFLOW_RUN_NAME_PREFIX`
+
+### MLflow Quick Start
+
+This is the shortest version.
+
+If you want MLflow locally with a file-backed store in this repo:
+
+1. Install the package:
+
+```powershell
+pip install -e .[dev]
+```
+
+2. Create your local environment file:
+
+```powershell
+Copy-Item .env.example .env -Force
+```
+
+3. Enable MLflow in `.env`:
+
+```text
+AMAZON_RECSYS_MLFLOW_ENABLED=true
+AMAZON_RECSYS_MLFLOW_TRACKING_URI=
+AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME=amazon-recsys-local
+AMAZON_RECSYS_MLFLOW_BACKEND_ROOT=mlflow_runs
+```
+
+4. Start the MLflow UI:
+
+```powershell
+mlflow ui --backend-store-uri ".\mlflow_runs" --port 5000
+```
+
+5. Train and export a bundle:
+
+```powershell
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+```
+
+6. Start the app:
+
+```powershell
+python -m amazon_recsys.cli.main serve
+```
+
+7. Open:
+
+- `http://127.0.0.1:5000/` for MLflow
+- `http://127.0.0.1:8000/` for the recommender app
+
+What this gives you:
+
+- the recommender still serves the exported active bundle
+- MLflow stores the training run, metrics, and bundle lineage
+- the default local MLflow store lives in `mlflow_runs/`
+
+### Local MLflow exact commands
+
+```powershell
+pip install -e .[dev]
+Copy-Item .env.example .env -Force
+mlflow ui --backend-store-uri ".\mlflow_runs" --port 5000
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+python -m amazon_recsys.cli.main serve
+```
+
+### Production MLflow exact commands
+
+```powershell
+$env:AMAZON_RECSYS_ENVIRONMENT="production"
+$env:AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING="false"
+$env:AMAZON_RECSYS_MLFLOW_ENABLED="true"
+$env:AMAZON_RECSYS_MLFLOW_TRACKING_URI="http://your-mlflow-server:5000"
+$env:AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME="amazon-recsys-prod"
+$env:AMAZON_RECSYS_MLFLOW_RUN_NAME_PREFIX="prod"
+python -m amazon_recsys.cli.main export-bundle --run-name prod-local --run-profile quality --activate
+python -m amazon_recsys.cli.main serve
+```
+
+### Local MLflow mode
+
+Use local MLflow mode when you want the training history stored directly inside the repo workspace.
+
+Recommended `.env` values:
+
+- `AMAZON_RECSYS_MLFLOW_ENABLED=true`
+- `AMAZON_RECSYS_MLFLOW_TRACKING_URI=`
+- `AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME=amazon-recsys-local`
+- `AMAZON_RECSYS_MLFLOW_BACKEND_ROOT=mlflow_runs`
+
+Important detail:
+
+- if `AMAZON_RECSYS_MLFLOW_TRACKING_URI` is left blank, the app uses the local file-backed store under `mlflow_runs`
+
+Typical local MLflow workflow:
+
+```powershell
+pip install -e .[dev]
+Copy-Item .env.example .env -Force
+mlflow ui --backend-store-uri ".\mlflow_runs" --port 5000
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+python -m amazon_recsys.cli.main serve
+```
+
+Open:
+
+- `http://127.0.0.1:5000/` for MLflow
+- `http://127.0.0.1:8000/` for the app
+
+What to expect:
+
+- the `export-bundle` command trains the recommender
+- the training run appears in MLflow
+- the evaluation CSV artifacts appear in the run
+- the final bundle files are attached to that same run under the bundle artifact path
+
+### Production MLflow mode
+
+Use production MLflow mode when you want the same training and bundle lineage sent to a remote tracking service.
+
+Recommended environment values:
+
+- `AMAZON_RECSYS_MLFLOW_ENABLED=true`
+- `AMAZON_RECSYS_MLFLOW_TRACKING_URI=http://your-mlflow-server:5000`
+- `AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME=amazon-recsys-prod`
+- `AMAZON_RECSYS_MLFLOW_RUN_NAME_PREFIX=prod`
+
+Typical production-style workflow:
+
+```powershell
+$env:AMAZON_RECSYS_ENVIRONMENT="production"
+$env:AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING="false"
+$env:AMAZON_RECSYS_MLFLOW_ENABLED="true"
+$env:AMAZON_RECSYS_MLFLOW_TRACKING_URI="http://your-mlflow-server:5000"
+$env:AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME="amazon-recsys-prod"
+python -m amazon_recsys.cli.main export-bundle --run-name prod-local --run-profile quality --activate
+python -m amazon_recsys.cli.main serve
+```
+
+In production mode:
+
+- the API still serves only the active exported bundle
+- MLflow tracks training and bundle lineage
+- the web app does not need MLflow to be reachable at serving time unless you choose to build a direct MLflow UI integration later
 
 ## How To Work With The Repo
 
@@ -491,6 +678,8 @@ Important default values from `.env.example`:
 - `AMAZON_RECSYS_RUN_PROFILE=debug`
 - `AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING=true`
 - `AMAZON_RECSYS_RANKER_BACKEND=xgboost`
+- `AMAZON_RECSYS_MLFLOW_ENABLED=false`
+- `AMAZON_RECSYS_MLFLOW_BACKEND_ROOT=mlflow_runs`
 
 What to expect:
 
@@ -526,6 +715,7 @@ What actually happens under the hood:
 - it trains the ranker
 - it saves a bundle under `artifacts/amazon_recsys/bundles/`
 - it writes or updates `artifacts/production/active_bundle.json`
+- if MLflow is enabled, it logs the run configuration, evaluation artifacts, metrics, and bundle lineage to the configured tracking store
 
 Why this is the most important command:
 
@@ -661,6 +851,13 @@ python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-prof
 python -m amazon_recsys.cli.main serve
 ```
 
+If you also want local MLflow tracking:
+
+```bash
+mlflow ui --backend-store-uri "./mlflow_runs" --port 5000
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+```
+
 ### Production-like local mode
 
 Use this when you want readiness and serving semantics closer to production.
@@ -677,6 +874,14 @@ Typical commands:
 ```bash
 python -m amazon_recsys.cli.main export-bundle --run-name prod-local --run-profile debug --activate
 python -m amazon_recsys.cli.main serve
+```
+
+If you also want production-style remote MLflow tracking:
+
+```bash
+export AMAZON_RECSYS_MLFLOW_ENABLED=true
+export AMAZON_RECSYS_MLFLOW_TRACKING_URI=http://your-mlflow-server:5000
+python -m amazon_recsys.cli.main export-bundle --run-name prod-local --run-profile quality --activate
 ```
 
 Expected behavior:

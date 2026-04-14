@@ -53,7 +53,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "train":
         session = container.training_pipeline.run(force_rebuild=args.force_rebuild)
-        print(json.dumps(session.evaluation_summary, indent=2, default=str))
+        payload = dict(session.evaluation_summary)
+        if session.mlflow_run_id is not None:
+            payload["mlflow"] = {
+                "run_id": session.mlflow_run_id,
+                "experiment_name": session.mlflow_experiment_name,
+                "tracking_uri": session.mlflow_tracking_uri,
+            }
+        print(json.dumps(payload, indent=2, default=str))
         return 0
 
     if args.command == "evaluate":

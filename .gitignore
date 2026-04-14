@@ -7,6 +7,9 @@ __pycache__/
 **/amazon_review_data
 notebooks/amazon_review_data
 artifacts/
+mlflow_probe_store/
+mlflow_runs/
+
 
 # C extensions
 *.so
