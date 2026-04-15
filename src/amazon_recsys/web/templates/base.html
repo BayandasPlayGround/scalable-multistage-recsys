@@ -4,10 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "Amazon RecSys Platform" }}</title>
-    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='/favicon.svg') }}" />
-    <link rel="shortcut icon" href="{{ url_for('static', path='/favicon.svg') }}" />
-    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}" />
-    <script defer src="{{ url_for('static', path='/app.js') }}"></script>
+    {% set static_version = "2026-04-15-ui-refresh-2" %}
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='/favicon.svg') }}?v={{ static_version }}" />
+    <link rel="shortcut icon" href="{{ url_for('static', path='/favicon.svg') }}?v={{ static_version }}" />
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ static_version }}" />
+    <script defer src="{{ url_for('static', path='/app.js') }}?v={{ static_version }}"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -29,9 +30,10 @@
           <a class="nav-item" href="#overview"><span class="nav-dot"></span><span>Overview</span></a>
           <a class="nav-item" href="#query"><span class="nav-dot"></span><span>Recommendation Workbench</span></a>
           <a class="nav-item" href="#recommendations"><span class="nav-dot"></span><span>Recommendations</span></a>
-          <a class="nav-item" href="#history"><span class="nav-dot"></span><span>User History</span></a>
-          <a class="nav-item" href="#users"><span class="nav-dot"></span><span>User Explorer</span></a>
-          <a class="nav-item" href="#evaluation"><span class="nav-dot"></span><span>Evaluation</span></a>
+          <a class="nav-item" href="#history" data-tab-link="history" data-tab-group-name="insights" data-tab-section="insights"><span class="nav-dot"></span><span>User History</span></a>
+          <a class="nav-item" href="#users" data-tab-link="users" data-tab-group-name="insights" data-tab-section="insights"><span class="nav-dot"></span><span>User Explorer</span></a>
+          <a class="nav-item" href="#evaluation" data-tab-link="evaluation" data-tab-group-name="insights" data-tab-section="insights"><span class="nav-dot"></span><span>Offline Diagnostics</span></a>
+          <a class="nav-item" href="#monitoring" data-tab-link="monitoring" data-tab-group-name="insights" data-tab-section="insights"><span class="nav-dot"></span><span>Monitoring</span></a>
           <a class="nav-item" href="/docs"><span class="nav-dot"></span><span>API Docs</span></a>
         </nav>
 

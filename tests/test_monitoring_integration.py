@@ -45,26 +45,17 @@ def test_monitoring_summary_is_persisted_and_exposed_via_api(test_settings) -> N
 
     inference_frame = container.monitoring_store.load_inference_frame(bundle_version=manifest.version)
     assert not inference_frame.empty
-    top_rank = inference_frame.sort_values(["request_id", "rank"]).drop_duplicates("request_id").copy()
-    top_rank["occurred_at"] = pd.to_datetime(top_rank["requested_at"], utc=True) + pd.Timedelta(minutes=1)
-    top_rank["event_type"] = "purchase"
-    top_rank["rating"] = 5.0
-
-    outcomes_path = settings.workspace_root / "monitoring-outcomes.csv"
-    top_rank[["occurred_at", "user_key", "item_id", "event_type", "rating"]].to_csv(outcomes_path, index=False)
-    ingest_payload = container.monitoring_service.ingest_outcomes(outcomes_path)
-    assert ingest_payload["ingested"] == len(top_rank)
-
     requested_at = pd.to_datetime(inference_frame["requested_at"], utc=True)
     summary = container.monitoring_service.run_monitoring(
         window_start=(requested_at.min() - pd.Timedelta(minutes=1)).isoformat(),
         window_end=(requested_at.max() + pd.Timedelta(minutes=2)).isoformat(),
         bundle_version=manifest.version,
+        simulate_outcomes=True,
     )
 
     assert summary.bundle_version == manifest.version
     assert summary.inference_count == int(inference_frame["request_id"].nunique())
-    assert summary.outcome_count == len(top_rank)
+    assert summary.outcome_count == int(inference_frame["request_id"].nunique())
     assert summary.concept_drift.sample_size == int(inference_frame["request_id"].nunique())
     assert Path(manifest.notes["reference_profile_path"]).exists()
 
@@ -80,6 +71,38 @@ def test_monitoring_summary_is_persisted_and_exposed_via_api(test_settings) -> N
     assert payload["available"] is True
     assert payload["bundle_version"] == manifest.version
     assert payload["summary"]["window_end"] == summary.window_end
+
+    dashboard_response = client.get("/")
+    assert dashboard_response.status_code == 200
+    assert "Latest monitoring trajectory" in dashboard_response.text
+    assert "sparkline-chart" in dashboard_response.text
+
+
+@pytest.mark.config
+@pytest.mark.data
+@pytest.mark.serving
+def test_monitor_backfill_can_auto_simulate_recent_outcomes(test_settings) -> None:
+    settings = _monitoring_settings(test_settings)
+    settings.ensure_runtime_directories()
+    container = build_container(settings)
+
+    session = container.training_pipeline.run(force_rebuild=True)
+    manifest = container.artifact_store.save_bundle(session, version="monitoring-backfill-fixture")
+    container.artifact_store.activate_bundle(manifest.version)
+    container.recommendation_service.refresh()
+
+    container.recommendation_service.recommend(user_id="u1", top_k=5)
+    summaries = container.monitoring_service.monitor_backfill(
+        days=1,
+        bundle_version=manifest.version,
+        simulate_outcomes=True,
+    )
+
+    assert summaries
+    latest = summaries[-1]
+    assert latest.bundle_version == manifest.version
+    assert latest.inference_count >= 1
+    assert latest.outcome_count >= 1
 
 
 @pytest.mark.slow
@@ -108,16 +131,14 @@ def test_monitoring_run_is_logged_to_mlflow(test_settings) -> None:
         container.recommendation_service.recommend(user_id="u1", top_k=5)
 
         inference_frame = container.monitoring_store.load_inference_frame(bundle_version=manifest.version)
-        top_rank = inference_frame.sort_values(["request_id", "rank"]).drop_duplicates("request_id").copy()
-        top_rank["occurred_at"] = pd.to_datetime(top_rank["requested_at"], utc=True) + pd.Timedelta(minutes=1)
-        top_rank["event_type"] = "purchase"
-        top_rank["rating"] = 5.0
-
-        outcomes_path = settings.workspace_root / "monitoring-mlflow-outcomes.csv"
-        top_rank[["occurred_at", "user_key", "item_id", "event_type", "rating"]].to_csv(outcomes_path, index=False)
-        container.monitoring_service.ingest_outcomes(outcomes_path)
-
         requested_at = pd.to_datetime(inference_frame["requested_at"], utc=True)
+        simulate_payload = container.monitoring_service.simulate_outcomes(
+            bundle_version=manifest.version,
+            window_start=(requested_at.min() - pd.Timedelta(minutes=1)).isoformat(),
+            window_end=(requested_at.max() + pd.Timedelta(minutes=2)).isoformat(),
+        )
+        assert simulate_payload["ingested"] == 1
+
         summary = container.monitoring_service.run_monitoring(
             window_start=(requested_at.min() - pd.Timedelta(minutes=1)).isoformat(),
             window_end=(requested_at.max() + pd.Timedelta(minutes=2)).isoformat(),

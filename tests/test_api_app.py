@@ -38,6 +38,10 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     assert "Amazon RecSys" in page_response.text
     assert "available-users" in page_response.text
     assert "data-local-shutdown" in page_response.text
-    assert "/static/favicon.svg" in page_response.text
-    assert "/static/app.js" in page_response.text
+    assert "/static/favicon.svg?v=" in page_response.text
+    assert "/static/style.css?v=" in page_response.text
+    assert "/static/app.js?v=" in page_response.text
     assert "data-enhanced-form" in page_response.text
+    assert "Deep-dive workspace" in page_response.text
+    assert 'data-tab-group="insights"' in page_response.text
+    assert 'data-tab-target="monitoring"' in page_response.text

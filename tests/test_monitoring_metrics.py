@@ -67,6 +67,11 @@ def test_feature_drifts_raise_alerts_for_large_distribution_shifts() -> None:
     assert by_name["served_category_mix"].status == "alert"
     assert by_name["candidate_source_mix"].status == "alert"
     assert by_name["item_popularity_bucket"].status == "alert"
+    assert by_name["served_price"].reference_value["proportions"]
+    assert by_name["served_price"].current_value["proportions"]
+    assert by_name["served_price"].reference_value["bin_labels"]
+    assert by_name["served_category_mix"].reference_value["comparison_categories"]
+    assert by_name["served_category_mix"].current_value["comparison_categories"]
 
 
 def test_concept_drift_requires_consecutive_degraded_windows_for_alert() -> None:

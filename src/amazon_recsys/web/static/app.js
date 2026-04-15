@@ -3,6 +3,10 @@
   const enhancedLinkSelector = "a[data-enhanced-nav]";
   const enhancedFormSelector = "form[data-enhanced-form]";
   const shutdownSelector = "[data-local-shutdown]";
+  const tabButtonSelector = "[data-tab-target]";
+  const tabLinkSelector = "[data-tab-link]";
+  const tabPanelSelector = "[data-tab-panel]";
+  const tabStatePrefix = "amazon-recsys-tab:";
 
   function formatLabel(value) {
     return value
@@ -23,8 +27,97 @@
     return document.querySelector(workspaceSelector);
   }
 
+  function getActiveTabName(groupName = "insights") {
+    const activeButton = document.querySelector(`${tabButtonSelector}[data-tab-group-name="${groupName}"].is-active`);
+    return activeButton?.dataset.tabTarget || "";
+  }
+
   function isModifiedClick(event) {
     return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0;
+  }
+
+  function readStoredTab(groupName) {
+    try {
+      return window.sessionStorage.getItem(`${tabStatePrefix}${groupName}`);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function writeStoredTab(groupName, tabName) {
+    try {
+      window.sessionStorage.setItem(`${tabStatePrefix}${groupName}`, tabName);
+    } catch (error) {
+      // Ignore storage failures and continue with in-memory behaviour.
+    }
+  }
+
+  function resolveHashTab(root, groupName) {
+    const hashValue = window.location.hash.replace(/^#/, "").trim();
+    if (!hashValue) {
+      return null;
+    }
+    const targetPanel = root.querySelector(`${tabPanelSelector}[data-tab-group-name="${groupName}"][data-tab-panel="${hashValue}"]`);
+    return targetPanel ? hashValue : null;
+  }
+
+  function activateTab(root, groupName, tabName, { updateHash = false, scrollToSection = false } = {}) {
+    const buttons = Array.from(root.querySelectorAll(`${tabButtonSelector}[data-tab-group-name="${groupName}"]`));
+    const panels = Array.from(root.querySelectorAll(`${tabPanelSelector}[data-tab-group-name="${groupName}"]`));
+    if (!buttons.length || !panels.length) {
+      return false;
+    }
+
+    const hasTarget = panels.some((panel) => panel.dataset.tabPanel === tabName);
+    if (!hasTarget) {
+      return false;
+    }
+
+    buttons.forEach((button) => {
+      const isActive = button.dataset.tabTarget === tabName;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-selected", String(isActive));
+      button.tabIndex = isActive ? 0 : -1;
+    });
+
+    panels.forEach((panel) => {
+      const isActive = panel.dataset.tabPanel === tabName;
+      panel.hidden = !isActive;
+      panel.classList.toggle("is-active", isActive);
+    });
+
+    writeStoredTab(groupName, tabName);
+
+    if (updateHash) {
+      const nextUrl = `${window.location.pathname}${window.location.search}#${tabName}`;
+      window.history.replaceState(window.history.state, "", nextUrl);
+    }
+
+    if (scrollToSection) {
+      const sectionId =
+        root.querySelector(`[data-tab-group="${groupName}"]`)?.id ||
+        root.querySelector(`${tabLinkSelector}[data-tab-group-name="${groupName}"]`)?.dataset.tabSection;
+      if (sectionId) {
+        document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }
+
+    return true;
+  }
+
+  function initialiseTabs(root = document) {
+    const groups = Array.from(root.querySelectorAll("[data-tab-group]"));
+    groups.forEach((group) => {
+      const groupName = group.dataset.tabGroup;
+      if (!groupName) {
+        return;
+      }
+      const defaultTab = group.dataset.defaultTab || group.querySelector(tabButtonSelector)?.dataset.tabTarget;
+      const resolvedTab = resolveHashTab(root, groupName) || defaultTab || readStoredTab(groupName);
+      if (resolvedTab) {
+        activateTab(root, groupName, resolvedTab, { updateHash: false, scrollToSection: false });
+      }
+    });
   }
 
   async function refreshWorkspace(url, { pushState = true } = {}) {
@@ -56,6 +149,7 @@
       document.title = parsed.title || document.title;
       currentWorkspace.replaceWith(nextWorkspace);
       initialiseTableFilters(document);
+      initialiseTabs(document);
 
       if (pushState) {
         window.history.pushState({}, "", url);
@@ -81,7 +175,9 @@
       params.set(key, value);
     }
     const query = params.toString();
-    return query ? `${action}?${query}` : action;
+    const baseUrl = query ? `${action}?${query}` : action;
+    const activeTab = getActiveTabName();
+    return activeTab ? `${baseUrl}#${activeTab}` : baseUrl;
   }
 
   function buildSelectOptions(select, rows, filterKey) {
@@ -204,6 +300,30 @@
   }
 
   document.addEventListener("click", (event) => {
+    const tabButton = event.target.closest(tabButtonSelector);
+    if (tabButton) {
+      event.preventDefault();
+      activateTab(
+        document,
+        tabButton.dataset.tabGroupName || "",
+        tabButton.dataset.tabTarget || "",
+        { updateHash: true, scrollToSection: false }
+      );
+      return;
+    }
+
+    const tabLink = event.target.closest(tabLinkSelector);
+    if (tabLink) {
+      event.preventDefault();
+      activateTab(
+        document,
+        tabLink.dataset.tabGroupName || "",
+        tabLink.dataset.tabLink || "",
+        { updateHash: true, scrollToSection: true }
+      );
+      return;
+    }
+
     const shutdownButton = event.target.closest(shutdownSelector);
     if (shutdownButton) {
       event.preventDefault();
@@ -225,7 +345,14 @@
     }
 
     event.preventDefault();
-    void refreshWorkspace(link.href, { pushState: true });
+    const resolvedUrl = new URL(link.href, window.location.origin);
+    if (!resolvedUrl.hash) {
+      const activeTab = getActiveTabName();
+      if (activeTab && resolvedUrl.pathname === window.location.pathname) {
+        resolvedUrl.hash = activeTab;
+      }
+    }
+    void refreshWorkspace(resolvedUrl.toString(), { pushState: true });
   });
 
   document.addEventListener("submit", (event) => {
@@ -259,5 +386,19 @@
     void refreshWorkspace(`${window.location.pathname}${window.location.search}`, { pushState: false });
   });
 
+  window.addEventListener("hashchange", () => {
+    const matchedButton = document.querySelector(`${tabButtonSelector}[data-tab-target="${window.location.hash.replace(/^#/, "")}"]`);
+    if (!matchedButton) {
+      return;
+    }
+    activateTab(
+      document,
+      matchedButton.dataset.tabGroupName || "",
+      matchedButton.dataset.tabTarget || "",
+      { updateHash: false, scrollToSection: false }
+    );
+  });
+
   initialiseTableFilters(document);
+  initialiseTabs(document);
 })();

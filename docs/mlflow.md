@@ -24,6 +24,79 @@ One MLflow run can therefore tell you:
 - `AMAZON_RECSYS_MLFLOW_BACKEND_ROOT`
 - `AMAZON_RECSYS_MLFLOW_RUN_NAME_PREFIX`
 
+## How To Customize The Experiment Name
+
+The experiment name is controlled by:
+
+- `AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME`
+
+You can set it in two main ways.
+
+### Option 1: Set It In `.env`
+
+This is the normal persistent approach.
+
+Example:
+
+```text
+AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME=enaex-recsys-dev
+```
+
+Then run your normal training command:
+
+```powershell
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+```
+
+That run will be logged under the MLflow experiment:
+
+- `enaex-recsys-dev`
+
+### Option 2: Override It For One Shell Session
+
+This is useful when you want a temporary name without editing `.env`.
+
+PowerShell example:
+
+```powershell
+$env:AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME="enaex-recsys-qa"
+python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
+```
+
+That only affects commands run in the current shell session.
+
+### Important Monitoring Detail
+
+The monitoring subsystem uses the same base experiment name and appends `-monitoring`.
+
+Example:
+
+- if `AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME=enaex-recsys-dev`
+- training runs go to `enaex-recsys-dev`
+- monitoring runs go to `enaex-recsys-dev-monitoring`
+
+### Related But Different Setting: Run Names
+
+Do not confuse the experiment name with the run name prefix.
+
+- `AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME`
+  - controls which experiment bucket the run appears under
+- `AMAZON_RECSYS_MLFLOW_RUN_NAME_PREFIX`
+  - changes the run name inside that experiment
+
+Example:
+
+```powershell
+$env:AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME="enaex-recsys-prod"
+$env:AMAZON_RECSYS_MLFLOW_RUN_NAME_PREFIX="prod"
+python -m amazon_recsys.cli.main export-bundle --run-name prod-local --run-profile quality --activate
+```
+
+That gives you:
+
+- experiment: `enaex-recsys-prod`
+- run name: something like `prod-train-prod-local-quality`
+
 ## MLflow Quick Start
 
 If you want MLflow locally with a file-backed store in this repo:

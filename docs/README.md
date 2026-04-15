@@ -37,3 +37,5 @@ This folder holds the detailed project documentation that used to live in the to
   - outcome ingestion
   - monitoring commands
   - dashboard and API summary surface
+- `examples/outcomes.example.csv`
+  - starter delayed-outcomes file for the monitoring workflow

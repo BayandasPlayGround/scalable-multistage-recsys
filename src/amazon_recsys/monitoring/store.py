@@ -78,6 +78,13 @@ class LocalMonitoringStore:
         return int(len(frame))
 
     def _load_records_from_source(self, source: Path) -> pd.DataFrame:
+        if not source.exists():
+            raise FileNotFoundError(
+                "Outcome source file was not found at "
+                f"{source!s}. Create a CSV/JSON/Parquet file with columns "
+                "'occurred_at', 'item_id', 'event_type', and either 'user_id' or 'user_key'. "
+                "See docs/monitoring.md and docs/examples/outcomes.example.csv."
+            )
         suffix = source.suffix.lower()
         if suffix == ".csv":
             return pd.read_csv(source)

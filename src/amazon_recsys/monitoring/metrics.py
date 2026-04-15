@@ -84,6 +84,7 @@ def _distribution_with_reference_bins(series: pd.Series, profile: dict[str, Any]
             "sample_size": int(len(values)),
             "mean": float(values.mean()) if not values.empty else None,
             "std": float(values.std(ddof=0)) if len(values) > 1 else 0.0 if len(values) == 1 else None,
+            "bin_edges": [float(edge) for edge in bin_edges.tolist()],
         },
     )
 
@@ -131,6 +132,16 @@ def _status_from_metric(metric_type: str, metric_value: float, monitoring: Monit
     if metric_value >= warn_threshold:
         return "warn", warn_threshold, alert_threshold
     return "ok", warn_threshold, alert_threshold
+
+
+def _numeric_bin_labels(bin_edges: list[float] | tuple[float, ...] | np.ndarray) -> list[str]:
+    resolved = np.asarray(bin_edges, dtype=float)
+    if resolved.size < 2:
+        return ["all"]
+    labels: list[str] = []
+    for left, right in zip(resolved[:-1], resolved[1:]):
+        labels.append(f"{left:.1f} to {right:.1f}")
+    return labels
 
 
 def _series_to_tokens(series: pd.Series) -> list[str]:
@@ -203,8 +214,19 @@ def compute_feature_drifts(
                 alert_threshold=alert_threshold,
                 status=status,
                 sample_size=int(current_summary["sample_size"]),
-                reference_value={"mean": profile.get("mean"), "sample_size": profile.get("sample_size", 0)},
-                current_value=current_summary,
+                reference_value={
+                    "mean": profile.get("mean"),
+                    "std": profile.get("std"),
+                    "sample_size": profile.get("sample_size", 0),
+                    "bin_edges": list(profile.get("bin_edges", [])),
+                    "bin_labels": _numeric_bin_labels(list(profile.get("bin_edges", []))),
+                    "proportions": list(profile.get("proportions", [])),
+                },
+                current_value={
+                    **current_summary,
+                    "bin_labels": _numeric_bin_labels(list(profile.get("bin_edges", []))),
+                    "proportions": current_distribution,
+                },
             )
         )
 
@@ -219,6 +241,10 @@ def compute_feature_drifts(
         status, warn_threshold, alert_threshold = _status_from_metric("js", metric_value, monitoring)
         reference_top = sorted(dict(profile.get("proportions", {})).items(), key=lambda item: item[1], reverse=True)[:3]
         current_top = sorted(current_distribution.items(), key=lambda item: item[1], reverse=True)[:3]
+        comparison_keys = []
+        for key, _ in reference_top + current_top:
+            if key not in comparison_keys:
+                comparison_keys.append(key)
         results.append(
             FeatureDriftResult(
                 feature_name=feature_name,
@@ -228,8 +254,22 @@ def compute_feature_drifts(
                 alert_threshold=alert_threshold,
                 status=status,
                 sample_size=int(current_summary["sample_size"]),
-                reference_value={"top_categories": reference_top},
-                current_value={"top_categories": current_top},
+                reference_value={
+                    "top_categories": reference_top,
+                    "proportions": dict(profile.get("proportions", {})),
+                    "comparison_categories": [
+                        {"label": key, "value": float(dict(profile.get("proportions", {})).get(key, 0.0))}
+                        for key in comparison_keys
+                    ],
+                },
+                current_value={
+                    "top_categories": current_top,
+                    "proportions": current_distribution,
+                    "comparison_categories": [
+                        {"label": key, "value": float(current_distribution.get(key, 0.0))}
+                        for key in comparison_keys
+                    ],
+                },
             )
         )
 

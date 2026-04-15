@@ -4,6 +4,107 @@
 {% set metric_files = evaluation_summary.metric_files if evaluation_summary.metric_files is defined else [] %}
 {% set drift_status = monitoring_summary.status if monitoring_summary.status is defined else "unavailable" %}
 {% set drift_features = monitoring_summary.top_drifting_features if monitoring_summary.top_drifting_features is defined else [] %}
+{% set feature_drifts = monitoring_summary.feature_drifts if monitoring_summary.feature_drifts is defined else [] %}
+{% set concept_drift = monitoring_summary.concept_drift if monitoring_summary.concept_drift is defined else {} %}
+{% set concept_k = concept_drift.monitored_k if concept_drift.monitored_k is defined else 10 %}
+{% set hit_key = 'hit_rate_at_' ~ concept_k %}
+{% set ndcg_key = 'ndcg_at_' ~ concept_k %}
+{% set mrr_key = 'mrr_at_' ~ concept_k %}
+{% set purchase_key = 'purchase_rate_at_' ~ concept_k %}
+{% set cold_start_key = 'cold_start_hit_rate_at_' ~ concept_k %}
+{% set drift_status_class = 'is-ready' if drift_status == 'ok' else 'is-warn' if drift_status == 'warn' else 'is-alert' if drift_status == 'alert' else '' %}
+{% if user_id and history %}
+  {% set default_analysis_tab = 'history' %}
+{% elif available_users %}
+  {% set default_analysis_tab = 'users' %}
+{% else %}
+  {% set default_analysis_tab = 'evaluation' %}
+{% endif %}
+
+{% macro concept_metric_card(title, metric_key, concept_drift) -%}
+  {% set current = concept_drift.metrics.get(metric_key) if concept_drift.metrics is defined else none %}
+  {% set baseline = concept_drift.baseline_metrics.get(metric_key) if concept_drift.baseline_metrics is defined else none %}
+  {% set delta = concept_drift.deltas.get(metric_key) if concept_drift.deltas is defined else none %}
+  <article class="comparison-card">
+    <span class="comparison-kicker">{{ title }}</span>
+    <strong class="comparison-value">{{ "%.3f"|format(current) if current is not none else "n/a" }}</strong>
+    <span class="comparison-baseline">Baseline {{ "%.3f"|format(baseline) if baseline is not none else "n/a" }}</span>
+    <span class="comparison-delta {% if delta is not none and delta < 0 %}is-negative{% elif delta is not none and delta > 0 %}is-positive{% endif %}">
+      {% if delta is not none %}
+        {{ "%+.3f"|format(delta) }} vs baseline
+      {% else %}
+        Baseline delta unavailable
+      {% endif %}
+    </span>
+  </article>
+{%- endmacro %}
+
+{% macro histogram_row(label, values, tone_class) -%}
+  <div class="histogram-row">
+    <span class="histogram-row-label">{{ label }}</span>
+    <div class="histogram-bars">
+      {% for value in values %}
+      {% set bar_height = (value * 100) if (value * 100) > 10 else 10 %}
+      <span class="histogram-bar {{ tone_class }}" style="height: {{ "%.1f"|format(bar_height) }}%;" title="{{ "%.3f"|format(value) }}"></span>
+      {% endfor %}
+    </div>
+  </div>
+{%- endmacro %}
+
+{% macro mix_row(label, entries, tone_class) -%}
+  <div class="mix-row">
+    <span class="mix-row-label">{{ label }}</span>
+    <div class="mix-bars">
+      {% for entry in entries %}
+      <div class="mix-bar-block">
+        <span class="mix-bar-label">{{ entry.label | replace("_", " ") }}</span>
+        <div class="mix-bar-track">
+          <span class="mix-bar-fill {{ tone_class }}" style="width: {{ "%.1f"|format(entry.value * 100) }}%;"></span>
+        </div>
+        <span class="mix-bar-value">{{ "%.0f"|format(entry.value * 100) }}%</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+{%- endmacro %}
+
+{% macro format_trend_value(value, value_format) -%}
+  {% if value is none %}
+    n/a
+  {% elif value_format == 'percent' %}
+    {{ "%.1f"|format(value * 100) }}%
+  {% elif value_format == 'count' %}
+    {{ value|int }}
+  {% else %}
+    {{ "%.3f"|format(value) }}
+  {% endif %}
+{%- endmacro %}
+
+{% macro trend_card(card) -%}
+  {% set tone_class = 'is-alert' if card.tone == 'alert' else 'is-current' %}
+  <article class="trend-card">
+    <div class="trend-card-head">
+      <div>
+        <span class="comparison-kicker">{{ card.title }}</span>
+        <strong class="trend-card-value">{{ format_trend_value(card.latest, card.format) }}</strong>
+      </div>
+      {% if card.delta is not none %}
+      <span class="trend-delta {% if card.delta < 0 %}is-negative{% elif card.delta > 0 %}is-positive{% endif %}">
+        {{ format_trend_value(card.delta, card.format) }} vs prior
+      </span>
+      {% endif %}
+    </div>
+    <div class="sparkline-frame">
+      <svg class="sparkline-chart" viewBox="0 0 152 44" preserveAspectRatio="none" aria-hidden="true">
+        <polyline class="sparkline-path {{ tone_class }}" points="{{ card.points }}"></polyline>
+      </svg>
+    </div>
+    <div class="sparkline-labels">
+      <span>{{ card.labels[0] if card.labels else "n/a" }}</span>
+      <span>{{ card.labels[-1] if card.labels else "n/a" }}</span>
+    </div>
+  </article>
+{%- endmacro %}
 
 <section class="hero-banner" id="overview">
   <article class="hero-card hero-card-main">
@@ -249,18 +350,119 @@
   {% endif %}
 </section>
 
-<section class="panel-grid panel-grid-secondary">
-  <article class="panel" id="history">
-    <div class="panel-head">
+<section class="panel panel-analysis-deck" id="insights" data-tab-group="insights" data-default-tab="{{ default_analysis_tab }}">
+  <div class="panel-head analysis-deck-head">
+    <div class="analysis-deck-copy">
+      <p class="section-kicker">Expanded Review Deck</p>
+      <h2>Deep-dive workspace</h2>
+      <p class="subtle">
+        Open one analysis view at a time so user inspection, offline diagnostics, and operational monitoring can breathe.
+      </p>
+    </div>
+    <div class="analysis-deck-meta">
+      <span class="panel-badge">4 views</span>
+      <span class="status-pill {{ drift_status_class }}">{{ drift_status | replace("_", " ") }}</span>
+    </div>
+  </div>
+
+  <div class="tab-bar" role="tablist" aria-label="Analysis deck">
+    <button
+      class="tab-button {% if default_analysis_tab == 'history' %}is-active{% endif %}"
+      id="history-tab"
+      type="button"
+      role="tab"
+      aria-selected="{{ 'true' if default_analysis_tab == 'history' else 'false' }}"
+      aria-controls="history"
+      data-tab-target="history"
+      data-tab-group-name="insights"
+    >
+      User History
+    </button>
+    <button
+      class="tab-button {% if default_analysis_tab == 'users' %}is-active{% endif %}"
+      id="users-tab"
+      type="button"
+      role="tab"
+      aria-selected="{{ 'true' if default_analysis_tab == 'users' else 'false' }}"
+      aria-controls="users"
+      data-tab-target="users"
+      data-tab-group-name="insights"
+    >
+      User Explorer
+    </button>
+    <button
+      class="tab-button {% if default_analysis_tab == 'evaluation' %}is-active{% endif %}"
+      id="evaluation-tab"
+      type="button"
+      role="tab"
+      aria-selected="{{ 'true' if default_analysis_tab == 'evaluation' else 'false' }}"
+      aria-controls="evaluation"
+      data-tab-target="evaluation"
+      data-tab-group-name="insights"
+    >
+      Offline Diagnostics
+    </button>
+    <button
+      class="tab-button {% if default_analysis_tab == 'monitoring' %}is-active{% endif %}"
+      id="monitoring-tab"
+      type="button"
+      role="tab"
+      aria-selected="{{ 'true' if default_analysis_tab == 'monitoring' else 'false' }}"
+      aria-controls="monitoring"
+      data-tab-target="monitoring"
+      data-tab-group-name="insights"
+    >
+      Operational Monitoring
+    </button>
+  </div>
+
+  <article
+    class="tab-panel"
+    id="history"
+    role="tabpanel"
+    aria-labelledby="history-tab"
+    data-tab-panel="history"
+    data-tab-group-name="insights"
+    {% if default_analysis_tab != 'history' %}hidden{% endif %}
+  >
+    <div class="tab-panel-head">
       <div>
         <p class="section-kicker">User Inspection</p>
         <h2>User history</h2>
       </div>
     </div>
 
+    <div class="insight-summary-grid">
+      <article class="insight-summary-card">
+        <span class="insight-label">Selected user</span>
+        <strong>{{ user_id or "No user selected" }}</strong>
+        <span class="insight-note">Load a known user to inspect the bundle input trail.</span>
+      </article>
+      <article class="insight-summary-card">
+        <span class="insight-label">History rows</span>
+        <strong>{{ history | length }}</strong>
+        <span class="insight-note">Sequence rows currently exposed for this request.</span>
+      </article>
+      <article class="insight-summary-card">
+        <span class="insight-label">Cold-start mode</span>
+        <strong>{{ "Yes" if history_items else "No" }}</strong>
+        <span class="insight-note">History override lets you test ad-hoc basket scenarios.</span>
+      </article>
+    </div>
+
     {% if history %}
-    <div class="table-wrap table-wrap-sticky table-wrap-history">
-      <table class="data-table">
+    <div class="table-toolbar" data-table-toolbar="history">
+      <label class="toolbar-field">
+        <span class="toolbar-label">Search</span>
+        <input type="text" placeholder="Filter by title, item id, or order date" data-table-search="history" />
+      </label>
+      <div class="toolbar-summary">
+        <span class="toolbar-count" data-table-count="history">{{ history | length }} shown</span>
+      </div>
+    </div>
+
+    <div class="table-wrap table-wrap-sticky table-wrap-analysis">
+      <table class="data-table data-table-history" data-filter-table="history">
         <thead>
           <tr>
             <th>Ordered</th>
@@ -270,7 +472,7 @@
         </thead>
         <tbody>
           {% for item in history %}
-          <tr>
+          <tr data-table-row="history" data-search="{{ ((item.ordered_at or '') ~ ' ' ~ (item.title or item.item_id) ~ ' ' ~ item.item_id) | lower }}">
             <td>{{ item.ordered_at }}</td>
             <td class="item-cell">
               <span class="item-title">{{ item.title or item.item_id }}</span>
@@ -282,6 +484,7 @@
         </tbody>
       </table>
     </div>
+    <div class="table-empty-message" data-table-empty="history" hidden>No history rows match the current search.</div>
     {% else %}
     <div class="empty-state empty-state-compact">
       <strong>No user history loaded.</strong>
@@ -290,8 +493,16 @@
     {% endif %}
   </article>
 
-  <article class="panel" id="users">
-    <div class="panel-head">
+  <article
+    class="tab-panel"
+    id="users"
+    role="tabpanel"
+    aria-labelledby="users-tab"
+    data-tab-panel="users"
+    data-tab-group-name="insights"
+    {% if default_analysis_tab != 'users' %}hidden{% endif %}
+  >
+    <div class="tab-panel-head">
       <div>
         <p class="section-kicker">User Explorer</p>
         <h2>Available trained users</h2>
@@ -299,6 +510,24 @@
     </div>
 
     {% if available_users %}
+    <div class="insight-summary-grid">
+      <article class="insight-summary-card">
+        <span class="insight-label">Visible users</span>
+        <strong>{{ available_users | length }}</strong>
+        <span class="insight-note">Users exposed from the active bundle for QA and manual inspection.</span>
+      </article>
+      <article class="insight-summary-card">
+        <span class="insight-label">Current Top K</span>
+        <strong>{{ top_k }}</strong>
+        <span class="insight-note">Explorer links open the workbench with the current recommendation depth.</span>
+      </article>
+      <article class="insight-summary-card">
+        <span class="insight-label">Quick action</span>
+        <strong>One-click load</strong>
+        <span class="insight-note">Open any trained user directly into the live recommendation query.</span>
+      </article>
+    </div>
+
     <div class="table-toolbar" data-table-toolbar="users">
       <label class="toolbar-field">
         <span class="toolbar-label">Search</span>
@@ -317,8 +546,8 @@
       </div>
     </div>
 
-    <div class="table-wrap table-wrap-sticky table-wrap-users">
-      <table class="data-table" data-filter-table="users">
+    <div class="table-wrap table-wrap-sticky table-wrap-analysis">
+      <table class="data-table data-table-users" data-filter-table="users">
         <thead>
           <tr>
             <th>User</th>
@@ -335,7 +564,7 @@
             data-interactions="{{ user.interaction_count }}"
             data-history="{{ user.history_length }}"
           >
-            <td><a class="table-link" data-enhanced-nav href="/?user_id={{ user.user_id }}&top_k={{ top_k }}">{{ user.user_id }}</a></td>
+            <td class="item-cell"><a class="table-link" data-enhanced-nav href="/?user_id={{ user.user_id }}&top_k={{ top_k }}">{{ user.user_id }}</a></td>
             <td class="numeric-column">{{ user.interaction_count }}</td>
             <td class="numeric-column">{{ user.history_length }}</td>
             <td>{{ user.last_ordered_at or "n/a" }}</td>
@@ -345,7 +574,7 @@
       </table>
     </div>
     <div class="table-empty-message" data-table-empty="users" hidden>No users match the current explorer filters.</div>
-  {% else %}
+    {% else %}
     <div class="empty-state empty-state-compact">
       <strong>No trained users exposed yet.</strong>
       <p>Activate a real bundle to populate the searchable user list and the quick user explorer.</p>
@@ -353,16 +582,42 @@
     {% endif %}
   </article>
 
-  <article class="panel" id="evaluation">
-    <div class="panel-head">
+  <article
+    class="tab-panel"
+    id="evaluation"
+    role="tabpanel"
+    aria-labelledby="evaluation-tab"
+    data-tab-panel="evaluation"
+    data-tab-group-name="insights"
+    {% if default_analysis_tab != 'evaluation' %}hidden{% endif %}
+  >
+    <div class="tab-panel-head">
       <div>
         <p class="section-kicker">Offline Diagnostics</p>
         <h2>Evaluation summary</h2>
       </div>
     </div>
 
+    <div class="insight-summary-grid">
+      <article class="insight-summary-card">
+        <span class="insight-label">Metric files</span>
+        <strong>{{ metric_files | length }}</strong>
+        <span class="insight-note">Tracked offline diagnostics packaged inside the active bundle.</span>
+      </article>
+      <article class="insight-summary-card">
+        <span class="insight-label">Active bundle</span>
+        <strong>{{ active_model.version or "No active bundle" }}</strong>
+        <span class="insight-note">Current runtime version serving the recommendation API.</span>
+      </article>
+      <article class="insight-summary-card">
+        <span class="insight-label">Retriever variants</span>
+        <strong>{{ active_model.retriever_variants | length if active_model.retriever_variants is defined else 0 }}</strong>
+        <span class="insight-note">Candidate generators currently reported by the active manifest.</span>
+      </article>
+    </div>
+
     {% if metric_files %}
-    <div class="metric-cards">
+    <div class="metric-cards metric-cards-grid">
       {% for metric_file in metric_files %}
       <div class="metric-card">
         <strong>{{ metric_file.file }}</strong>
@@ -378,8 +633,16 @@
     {% endif %}
   </article>
 
-  <article class="panel" id="monitoring">
-    <div class="panel-head">
+  <article
+    class="tab-panel"
+    id="monitoring"
+    role="tabpanel"
+    aria-labelledby="monitoring-tab"
+    data-tab-panel="monitoring"
+    data-tab-group-name="insights"
+    {% if default_analysis_tab != 'monitoring' %}hidden{% endif %}
+  >
+    <div class="tab-panel-head">
       <div>
         <p class="section-kicker">Operational Monitoring</p>
         <h2>Drift summary</h2>
@@ -387,22 +650,233 @@
     </div>
 
     {% if monitoring_summary %}
-    <dl class="metadata metadata-stack">
-      <div><dt>Status</dt><dd>{{ drift_status | replace("_", " ") }}</dd></div>
-      <div><dt>Window start</dt><dd>{{ monitoring_summary.window_start if monitoring_summary.window_start is defined else "n/a" }}</dd></div>
-      <div><dt>Window end</dt><dd>{{ monitoring_summary.window_end if monitoring_summary.window_end is defined else "n/a" }}</dd></div>
-      <div><dt>Inference requests</dt><dd>{{ monitoring_summary.inference_count if monitoring_summary.inference_count is defined else 0 }}</dd></div>
-      <div><dt>Outcome rows</dt><dd>{{ monitoring_summary.outcome_count if monitoring_summary.outcome_count is defined else 0 }}</dd></div>
-      <div><dt>Concept drop</dt><dd>{{ "%.3f"|format(monitoring_summary.concept_drift.performance_drop) if monitoring_summary.concept_drift is defined and monitoring_summary.concept_drift.performance_drop is not none else "n/a" }}</dd></div>
-    </dl>
-    <div class="metric-cards">
-      {% for feature_name in drift_features[:3] %}
-      <div class="metric-card">
-        <strong>{{ feature_name | replace("_", " ") }}</strong>
-        <span>Top drifting feature in the latest monitoring window</span>
+    <div class="monitoring-layout">
+      <div class="monitoring-main">
+        <div class="insight-summary-grid">
+          <article class="insight-summary-card">
+            <span class="insight-label">Status</span>
+            <strong>{{ drift_status | replace("_", " ") }}</strong>
+            <span class="insight-note">Latest persisted monitoring state for the active bundle.</span>
+          </article>
+          <article class="insight-summary-card">
+            <span class="insight-label">Window</span>
+            <strong>{{ monitoring_summary.window_start if monitoring_summary.window_start is defined else "n/a" }}</strong>
+            <span class="insight-note">From {{ monitoring_summary.window_start if monitoring_summary.window_start is defined else "n/a" }} to {{ monitoring_summary.window_end if monitoring_summary.window_end is defined else "n/a" }}.</span>
+          </article>
+          <article class="insight-summary-card">
+            <span class="insight-label">Volume</span>
+            <strong>{{ monitoring_summary.inference_count if monitoring_summary.inference_count is defined else 0 }} requests</strong>
+            <span class="insight-note">{{ monitoring_summary.outcome_count if monitoring_summary.outcome_count is defined else 0 }} outcome rows joined into the monitoring window.</span>
+          </article>
+          <article class="insight-summary-card">
+            <span class="insight-label">Concept drop</span>
+            <strong>{{ "%.3f"|format(concept_drift.performance_drop) if concept_drift.performance_drop is defined and concept_drift.performance_drop is not none else "n/a" }}</strong>
+            <span class="insight-note">Largest relative degradation versus offline baseline across monitored metrics.</span>
+          </article>
+        </div>
+
+        {% if monitoring_trends %}
+        <div class="monitor-trend-strip">
+          <div class="monitor-visual-head">
+            <div>
+              <p class="section-kicker">Recent Window Trends</p>
+              <h2>Latest monitoring trajectory</h2>
+            </div>
+            <span class="subtle">{{ monitoring_history | length }} persisted monitoring windows in view</span>
+          </div>
+          <div class="trend-grid">
+            {% for card in monitoring_trends %}
+            {{ trend_card(card) }}
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        <div class="comparison-grid">
+          {{ concept_metric_card("Hit Rate", hit_key, concept_drift) }}
+          {{ concept_metric_card("NDCG", ndcg_key, concept_drift) }}
+          {{ concept_metric_card("MRR", mrr_key, concept_drift) }}
+          {{ concept_metric_card("Purchase Rate", purchase_key, concept_drift) }}
+          {{ concept_metric_card("Cold-start Hit Rate", cold_start_key, concept_drift) }}
+        </div>
+
+        {% if feature_drifts %}
+        <div class="monitor-visual-section">
+          <div class="monitor-visual-head">
+            <div>
+              <p class="section-kicker">Distribution Comparisons</p>
+              <h2>Reference vs current drift shapes</h2>
+            </div>
+            <span class="subtle">Numeric features render as histograms. Categorical features render as share comparisons.</span>
+          </div>
+
+          <div class="distribution-grid">
+            {% for feature in feature_drifts %}
+              {% if feature.metric_type == 'psi' and feature.reference_value.proportions is defined and feature.current_value.proportions is defined %}
+              {% set feature_status_class = 'is-ready' if feature.status == 'ok' else 'is-warn' if feature.status == 'warn' else 'is-alert' %}
+              <article class="distribution-card">
+                <div class="distribution-card-head">
+                  <div>
+                    <strong>{{ feature.feature_name | replace("_", " ") }}</strong>
+                    <span class="subtle">PSI {{ "%.3f"|format(feature.metric_value) }}</span>
+                  </div>
+                  <span class="status-pill {{ feature_status_class }}">{{ feature.status }}</span>
+                </div>
+                <div class="histogram-card">
+                  {{ histogram_row("Reference", feature.reference_value.proportions, "is-reference") }}
+                  {{ histogram_row("Current", feature.current_value.proportions, "is-current") }}
+                </div>
+                {% if feature.reference_value.bin_labels is defined %}
+                <div class="histogram-labels">
+                  {% for label in feature.reference_value.bin_labels %}
+                  <span>{{ label }}</span>
+                  {% endfor %}
+                </div>
+                {% endif %}
+                <div class="distribution-summary">
+                  <span>Ref mean {{ "%.2f"|format(feature.reference_value.mean) if feature.reference_value.mean is not none else "n/a" }}</span>
+                  <span>Current mean {{ "%.2f"|format(feature.current_value.mean) if feature.current_value.mean is not none else "n/a" }}</span>
+                </div>
+              </article>
+              {% endif %}
+            {% endfor %}
+
+            {% for feature in feature_drifts %}
+              {% if feature.metric_type == 'js' and feature.reference_value.comparison_categories is defined and feature.current_value.comparison_categories is defined %}
+              {% set feature_status_class = 'is-ready' if feature.status == 'ok' else 'is-warn' if feature.status == 'warn' else 'is-alert' %}
+              <article class="distribution-card">
+                <div class="distribution-card-head">
+                  <div>
+                    <strong>{{ feature.feature_name | replace("_", " ") }}</strong>
+                    <span class="subtle">JS {{ "%.3f"|format(feature.metric_value) }}</span>
+                  </div>
+                  <span class="status-pill {{ feature_status_class }}">{{ feature.status }}</span>
+                </div>
+                <div class="mix-card">
+                  {{ mix_row("Reference", feature.reference_value.comparison_categories, "is-reference") }}
+                  {{ mix_row("Current", feature.current_value.comparison_categories, "is-current") }}
+                </div>
+              </article>
+              {% endif %}
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
       </div>
-      {% endfor %}
+
+      <aside class="monitoring-side">
+        <div class="monitoring-side-head">
+          <h3 class="subsection-title">Top drifting features</h3>
+          <span class="subtle">Visualized against alert thresholds</span>
+        </div>
+        {% if feature_drifts %}
+        <div class="drift-visual-list">
+          {% for feature in feature_drifts[:6] %}
+          {% set feature_status_class = 'is-ready' if feature.status == 'ok' else 'is-warn' if feature.status == 'warn' else 'is-alert' %}
+          <article class="drift-visual">
+            <div class="drift-visual-head">
+              <strong>{{ feature.feature_name | replace("_", " ") }}</strong>
+              <span class="status-pill {{ feature_status_class }}">{{ feature.status }}</span>
+            </div>
+            <div class="drift-bar-track">
+              <span
+                class="drift-bar-fill {{ feature_status_class }}"
+                style="width: {{ ((feature.metric_value / feature.alert_threshold) * 100) if feature.alert_threshold else 0 }}%;"
+              ></span>
+            </div>
+            <div class="drift-visual-meta">
+              <span>{{ feature.metric_type | upper }} {{ "%.3f"|format(feature.metric_value) }}</span>
+              <span>Alert {{ "%.2f"|format(feature.alert_threshold) }}</span>
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state empty-state-compact">
+          <strong>No feature-level drift rows are available.</strong>
+          <p>Run the monitoring job against a completed window to populate feature drift diagnostics.</p>
+        </div>
+        {% endif %}
+      </aside>
     </div>
+
+    {% if feature_drifts %}
+    <div class="table-toolbar" data-table-toolbar="feature-drifts">
+      <label class="toolbar-field">
+        <span class="toolbar-label">Search</span>
+        <input type="text" placeholder="Filter by feature name" data-table-search="feature-drifts" />
+      </label>
+      <label class="toolbar-field toolbar-field-compact">
+        <span class="toolbar-label">Status</span>
+        <select data-table-select="feature-drifts" data-filter-key="status">
+          <option value="">All statuses</option>
+        </select>
+      </label>
+      <label class="toolbar-field toolbar-field-compact">
+        <span class="toolbar-label">Metric</span>
+        <select data-table-select="feature-drifts" data-filter-key="metric">
+          <option value="">All metric types</option>
+        </select>
+      </label>
+      <div class="toolbar-summary">
+        <span class="toolbar-count" data-table-count="feature-drifts">{{ feature_drifts | length }} shown</span>
+      </div>
+    </div>
+
+    <div class="table-wrap table-wrap-sticky table-wrap-monitoring">
+      <table class="data-table data-table-monitoring" data-filter-table="feature-drifts">
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th>Metric</th>
+            <th class="numeric-column">Value</th>
+            <th>Status</th>
+            <th class="numeric-column">Sample</th>
+            <th>Reference snapshot</th>
+            <th>Current snapshot</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for feature in feature_drifts %}
+          {% set feature_status_class = 'is-ready' if feature.status == 'ok' else 'is-warn' if feature.status == 'warn' else 'is-alert' %}
+          <tr
+            data-table-row="feature-drifts"
+            data-search="{{ feature.feature_name | lower }}"
+            data-status="{{ feature.status | lower }}"
+            data-metric="{{ feature.metric_type | lower }}"
+          >
+            <td><span class="item-title">{{ feature.feature_name | replace("_", " ") }}</span></td>
+            <td>{{ feature.metric_type | upper }}</td>
+            <td class="numeric-column">{{ "%.3f"|format(feature.metric_value) }}</td>
+            <td><span class="status-pill {{ feature_status_class }}">{{ feature.status }}</span></td>
+            <td class="numeric-column">{{ feature.sample_size }}</td>
+            <td>
+              {% if feature.reference_value.top_categories is defined %}
+                {% for label, value in feature.reference_value.top_categories %}
+                <div class="snapshot-line">{{ label | replace("_", " ") }} <span>{{ "%.2f"|format(value) }}</span></div>
+                {% endfor %}
+              {% else %}
+                <div class="snapshot-line">Mean <span>{{ "%.2f"|format(feature.reference_value.mean) if feature.reference_value.mean is not none else "n/a" }}</span></div>
+                <div class="snapshot-line">Sample <span>{{ feature.reference_value.sample_size if feature.reference_value.sample_size is defined else "n/a" }}</span></div>
+              {% endif %}
+            </td>
+            <td>
+              {% if feature.current_value.top_categories is defined %}
+                {% for label, value in feature.current_value.top_categories %}
+                <div class="snapshot-line">{{ label | replace("_", " ") }} <span>{{ "%.2f"|format(value) }}</span></div>
+                {% endfor %}
+              {% else %}
+                <div class="snapshot-line">Mean <span>{{ "%.2f"|format(feature.current_value.mean) if feature.current_value.mean is not none else "n/a" }}</span></div>
+                <div class="snapshot-line">Sample <span>{{ feature.current_value.sample_size if feature.current_value.sample_size is defined else "n/a" }}</span></div>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="table-empty-message" data-table-empty="feature-drifts" hidden>No monitoring drift rows match the current filters.</div>
+    {% endif %}
     {% else %}
     <div class="empty-state empty-state-compact">
       <strong>No drift summary is available yet.</strong>

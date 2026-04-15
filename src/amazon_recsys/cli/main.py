@@ -32,14 +32,23 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = subparsers.add_parser("ingest-outcomes")
     ingest.add_argument("--source", required=True)
 
+    simulate = subparsers.add_parser("simulate-outcomes")
+    simulate.add_argument("--bundle-version", default="active")
+    simulate.add_argument("--window-start", default=None)
+    simulate.add_argument("--window-end", default=None)
+    simulate.add_argument("--days", type=int, default=1)
+    simulate.add_argument("--delay-minutes", type=int, default=60)
+
     monitor = subparsers.add_parser("monitor-drift")
     monitor.add_argument("--window-start", required=True)
     monitor.add_argument("--window-end", required=True)
     monitor.add_argument("--bundle-version", default="active")
+    monitor.add_argument("--simulate-outcomes", action="store_true")
 
     backfill = subparsers.add_parser("monitor-backfill")
     backfill.add_argument("--days", type=int, required=True)
     backfill.add_argument("--bundle-version", default="active")
+    backfill.add_argument("--simulate-outcomes", action="store_true")
 
     serve = subparsers.add_parser("serve")
     serve.add_argument("--host", default=None)
@@ -100,17 +109,33 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2, default=str))
         return 0
 
+    if args.command == "simulate-outcomes":
+        payload = container.monitoring_service.simulate_outcomes(
+            bundle_version=args.bundle_version,
+            window_start=args.window_start,
+            window_end=args.window_end,
+            days=args.days,
+            delay_minutes=args.delay_minutes,
+        )
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
     if args.command == "monitor-drift":
         summary = container.monitoring_service.run_monitoring(
             window_start=args.window_start,
             window_end=args.window_end,
             bundle_version=args.bundle_version,
+            simulate_outcomes=args.simulate_outcomes,
         )
         print(json.dumps(summary.to_dict(), indent=2, default=str))
         return 0
 
     if args.command == "monitor-backfill":
-        summaries = container.monitoring_service.monitor_backfill(days=args.days, bundle_version=args.bundle_version)
+        summaries = container.monitoring_service.monitor_backfill(
+            days=args.days,
+            bundle_version=args.bundle_version,
+            simulate_outcomes=args.simulate_outcomes,
+        )
         print(json.dumps([summary.to_dict() for summary in summaries], indent=2, default=str))
         return 0
 

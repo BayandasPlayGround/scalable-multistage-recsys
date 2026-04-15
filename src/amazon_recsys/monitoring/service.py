@@ -8,7 +8,7 @@ from uuid import uuid4
 import pandas as pd
 
 from amazon_recsys.config.settings import AppSettings
-from amazon_recsys.domain.entities import InferenceLogRecord, MonitoringSummary, ReferenceProfile, RuntimeBundle, utcnow_iso
+from amazon_recsys.domain.entities import InferenceLogRecord, MonitoringSummary, OutcomeLogRecord, ReferenceProfile, RuntimeBundle, utcnow_iso
 from amazon_recsys.infrastructure.artifacts import LocalArtifactStore
 from amazon_recsys.monitoring.metrics import (
     MONITORED_K,
@@ -51,6 +51,24 @@ class MonitoringService:
 
     def _reference_profile_for_bundle(self, bundle_version: str) -> ReferenceProfile:
         return self.monitoring_store.load_reference_profile(bundle_version)
+
+    def _resolve_monitoring_window(
+        self,
+        *,
+        window_start: str | None = None,
+        window_end: str | None = None,
+        days: int | None = None,
+    ) -> tuple[str, str]:
+        if window_start is not None or window_end is not None:
+            if window_start is None or window_end is None:
+                raise ValueError("Provide both window_start and window_end together.")
+            return ensure_utc_iso(window_start), ensure_utc_iso(window_end)
+        resolved_days = int(days) if days is not None else 1
+        if resolved_days <= 0:
+            raise ValueError("days must be positive.")
+        window_end_ts = pd.Timestamp.now(tz="UTC")
+        window_start_ts = window_end_ts - timedelta(days=resolved_days)
+        return ensure_utc_iso(window_start_ts), ensure_utc_iso(window_end_ts)
 
     def _bundle_user_history_length(self, bundle: RuntimeBundle, user_id: str) -> int:
         interactions = bundle.prepared.interactions
@@ -121,6 +139,71 @@ class MonitoringService:
     def ingest_outcomes(self, source: Path) -> dict[str, Any]:
         return self.monitoring_store.ingest_outcomes(Path(source))
 
+    def simulate_outcomes(
+        self,
+        *,
+        bundle_version: str = "active",
+        window_start: str | None = None,
+        window_end: str | None = None,
+        days: int | None = 1,
+        delay_minutes: int = 60,
+    ) -> dict[str, Any]:
+        resolved_bundle_version = self._resolve_bundle_version(bundle_version)
+        normalized_window_start, normalized_window_end = self._resolve_monitoring_window(
+            window_start=window_start,
+            window_end=window_end,
+            days=days,
+        )
+        inference_frame = self.monitoring_store.load_inference_frame(
+            bundle_version=resolved_bundle_version,
+            window_start=normalized_window_start,
+            window_end=normalized_window_end,
+        )
+        if inference_frame.empty:
+            raise ValueError(
+                "No inference events were found in the selected window. "
+                "Serve some recommendations first, then rerun monitoring with --simulate-outcomes."
+            )
+
+        linked = inference_frame.dropna(subset=["user_key"]).copy()
+        linked = linked[linked["user_key"].astype(str).str.strip() != ""].copy()
+        if linked.empty:
+            raise ValueError(
+                "Inference events were found, but none have a linked user_key. "
+                "Use known-user recommendation requests for the automated local monitoring flow."
+            )
+
+        top_rank = linked.sort_values(["request_id", "rank"]).drop_duplicates("request_id").copy()
+        records: list[OutcomeLogRecord] = []
+        for row in top_rank.to_dict(orient="records"):
+            occurred_at = ensure_utc_iso(
+                pd.to_datetime(row["requested_at"], utc=True) + timedelta(minutes=int(delay_minutes))
+            )
+            records.append(
+                OutcomeLogRecord(
+                    occurred_at=occurred_at,
+                    user_key=str(row["user_key"]),
+                    item_id=str(row["item_id"]),
+                    event_type="purchase",
+                    rating=5.0,
+                    value=None,
+                )
+            )
+
+        ingested = self.monitoring_store.append_outcome_records(records)
+        return {
+            "source": "synthetic_inference_replay",
+            "bundle_version": resolved_bundle_version,
+            "window_start": normalized_window_start,
+            "window_end": normalized_window_end,
+            "requests_seen": int(inference_frame["request_id"].nunique()),
+            "requests_with_user_key": int(top_rank["request_id"].nunique()),
+            "created": int(len(records)),
+            "ingested": ingested,
+            "event_type": "purchase",
+            "rating": 5.0,
+        }
+
     def _previous_summary(self, bundle_version: str, window_end: str) -> MonitoringSummary | None:
         current_end = pd.to_datetime(window_end, utc=True)
         previous = [
@@ -138,6 +221,7 @@ class MonitoringService:
         window_start: str,
         window_end: str,
         bundle_version: str = "active",
+        simulate_outcomes: bool = False,
     ) -> MonitoringSummary:
         resolved_bundle_version = self._resolve_bundle_version(bundle_version)
         reference_profile = self._reference_profile_for_bundle(resolved_bundle_version)
@@ -149,6 +233,13 @@ class MonitoringService:
             window_start=normalized_window_start,
             window_end=normalized_window_end,
         )
+        if simulate_outcomes:
+            self.simulate_outcomes(
+                bundle_version=resolved_bundle_version,
+                window_start=normalized_window_start,
+                window_end=normalized_window_end,
+                days=None,
+            )
         outcomes_end = ensure_utc_iso(pd.to_datetime(normalized_window_end, utc=True) + timedelta(days=int(self.settings.monitoring.attribution_horizon_days)))
         outcomes_frame = self.monitoring_store.load_outcome_frame(
             window_start=normalized_window_start,
@@ -188,12 +279,26 @@ class MonitoringService:
             self.monitoring_store.save_monitoring_summary(summary, feature_frame, concept_frame, reference_profile)
         return summary
 
-    def monitor_backfill(self, *, days: int, bundle_version: str = "active") -> list[MonitoringSummary]:
+    def monitor_backfill(self, *, days: int, bundle_version: str = "active", simulate_outcomes: bool = False) -> list[MonitoringSummary]:
         if int(days) <= 0:
             raise ValueError("days must be positive.")
         resolved_bundle_version = self._resolve_bundle_version(bundle_version)
         window_size = timedelta(days=int(self.settings.monitoring.window_days))
-        matured_end = pd.Timestamp.now(tz="UTC") - timedelta(days=int(self.settings.monitoring.label_delay_days))
+        if simulate_outcomes:
+            inference_frame = self.monitoring_store.load_inference_frame(bundle_version=resolved_bundle_version)
+            if inference_frame.empty:
+                raise ValueError(
+                    "No inference events were found for the active bundle. "
+                    "Serve some recommendations first, then rerun monitor-backfill --simulate-outcomes."
+                )
+            inference_timestamps = pd.to_datetime(inference_frame["requested_at"], utc=True, errors="coerce").dropna()
+            if inference_timestamps.empty:
+                raise ValueError(
+                    "Inference events were found, but no valid timestamps could be read from them."
+                )
+            matured_end = inference_timestamps.max() + pd.Timedelta(seconds=1)
+        else:
+            matured_end = pd.Timestamp.now(tz="UTC") - timedelta(days=int(self.settings.monitoring.label_delay_days))
         window_start = matured_end - timedelta(days=int(days))
         results: list[MonitoringSummary] = []
         cursor = window_start
@@ -204,6 +309,7 @@ class MonitoringService:
                     window_start=cursor.isoformat(),
                     window_end=next_cursor.isoformat(),
                     bundle_version=resolved_bundle_version,
+                    simulate_outcomes=simulate_outcomes,
                 )
             )
             cursor = next_cursor
@@ -212,3 +318,11 @@ class MonitoringService:
     def latest_summary(self, bundle_version: str = "active") -> MonitoringSummary | None:
         resolved_bundle_version = self._resolve_bundle_version(bundle_version)
         return self.monitoring_store.load_latest_summary(resolved_bundle_version)
+
+    def recent_summaries(self, bundle_version: str = "active", *, limit: int = 8) -> list[MonitoringSummary]:
+        resolved_bundle_version = self._resolve_bundle_version(bundle_version)
+        summaries = self.monitoring_store.list_summaries(resolved_bundle_version)
+        ordered = sorted(summaries, key=lambda item: pd.to_datetime(item.window_end, utc=True))
+        if limit <= 0:
+            return ordered
+        return ordered[-int(limit):]
