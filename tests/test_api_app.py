@@ -16,6 +16,7 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     config_response = client.get("/config")
     model_response = client.get("/models/active")
     users_response = client.get("/users")
+    monitoring_response = client.get("/monitoring/drift/summary")
     favicon_response = client.get("/favicon.ico")
     recommend_response = client.post("/recommend", json={"history_items": ["A1", "A2"], "top_k": 3})
     page_response = client.get("/")
@@ -25,6 +26,7 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     assert config_response.status_code == 200
     assert model_response.status_code == 200
     assert users_response.status_code == 200
+    assert monitoring_response.status_code == 503
     assert favicon_response.status_code == 200
     assert recommend_response.status_code == 200
     assert page_response.status_code == 200

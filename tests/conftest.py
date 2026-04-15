@@ -112,6 +112,8 @@ def test_settings(synthetic_workspace: Path) -> AppSettings:
         categories=("All_Beauty",),
         metadata_download_if_missing=False,
         use_mock_bundle_if_missing=False,
+        mlflow_enabled=False,
+        monitoring_enabled=False,
         run_name="pytest",
         run_profile="debug",
         show_progress=False,
@@ -141,6 +143,8 @@ def mock_settings(workspace_dir: Path) -> AppSettings:
         workspace_root=workspace_dir,
         environment="local",
         use_mock_bundle_if_missing=True,
+        mlflow_enabled=False,
+        monitoring_enabled=False,
         show_progress=False,
     )
     settings.ensure_runtime_directories()
@@ -158,6 +162,8 @@ def production_settings(synthetic_workspace: Path) -> AppSettings:
         categories=("All_Beauty",),
         metadata_download_if_missing=False,
         use_mock_bundle_if_missing=False,
+        mlflow_enabled=False,
+        monitoring_enabled=False,
         run_name="prod-pytest",
         run_profile="debug",
         show_progress=False,

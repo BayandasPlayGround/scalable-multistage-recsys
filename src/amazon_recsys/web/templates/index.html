@@ -2,6 +2,8 @@
 {% block content %}
 {% set model_status = active_model.status if active_model.status is defined else ("ready" if active_model.ready else "not_ready") %}
 {% set metric_files = evaluation_summary.metric_files if evaluation_summary.metric_files is defined else [] %}
+{% set drift_status = monitoring_summary.status if monitoring_summary.status is defined else "unavailable" %}
+{% set drift_features = monitoring_summary.top_drifting_features if monitoring_summary.top_drifting_features is defined else [] %}
 
 <section class="hero-banner" id="overview">
   <article class="hero-card hero-card-main">
@@ -56,6 +58,11 @@
     <span class="stat-label">Retriever Variants</span>
     <strong class="stat-value">{{ active_model.retriever_variants | length if active_model.retriever_variants is defined else 0 }}</strong>
     <span class="stat-note">Candidate generators participating in bundle inference</span>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Drift Status</span>
+    <strong class="stat-value">{{ drift_status | replace("_", " ") }}</strong>
+    <span class="stat-note">Latest persisted monitoring state for the active bundle</span>
   </article>
 </section>
 
@@ -367,6 +374,39 @@
     <div class="empty-state empty-state-compact">
       <strong>No evaluation files are active.</strong>
       <p>Export a trained bundle with evaluation artifacts to surface retrieval and ranking diagnostics here.</p>
+    </div>
+    {% endif %}
+  </article>
+
+  <article class="panel" id="monitoring">
+    <div class="panel-head">
+      <div>
+        <p class="section-kicker">Operational Monitoring</p>
+        <h2>Drift summary</h2>
+      </div>
+    </div>
+
+    {% if monitoring_summary %}
+    <dl class="metadata metadata-stack">
+      <div><dt>Status</dt><dd>{{ drift_status | replace("_", " ") }}</dd></div>
+      <div><dt>Window start</dt><dd>{{ monitoring_summary.window_start if monitoring_summary.window_start is defined else "n/a" }}</dd></div>
+      <div><dt>Window end</dt><dd>{{ monitoring_summary.window_end if monitoring_summary.window_end is defined else "n/a" }}</dd></div>
+      <div><dt>Inference requests</dt><dd>{{ monitoring_summary.inference_count if monitoring_summary.inference_count is defined else 0 }}</dd></div>
+      <div><dt>Outcome rows</dt><dd>{{ monitoring_summary.outcome_count if monitoring_summary.outcome_count is defined else 0 }}</dd></div>
+      <div><dt>Concept drop</dt><dd>{{ "%.3f"|format(monitoring_summary.concept_drift.performance_drop) if monitoring_summary.concept_drift is defined and monitoring_summary.concept_drift.performance_drop is not none else "n/a" }}</dd></div>
+    </dl>
+    <div class="metric-cards">
+      {% for feature_name in drift_features[:3] %}
+      <div class="metric-card">
+        <strong>{{ feature_name | replace("_", " ") }}</strong>
+        <span>Top drifting feature in the latest monitoring window</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state empty-state-compact">
+      <strong>No drift summary is available yet.</strong>
+      <p>Run the monitoring job after serving requests and ingesting delayed outcomes to populate operational drift diagnostics.</p>
     </div>
     {% endif %}
   </article>

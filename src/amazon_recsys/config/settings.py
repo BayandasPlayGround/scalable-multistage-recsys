@@ -112,6 +112,21 @@ class MLflowConfig(BaseModel):
     run_name_prefix: str = ""
 
 
+class MonitoringConfig(BaseModel):
+    enabled: bool = False
+    monitoring_root: Path
+    window_days: int = 1
+    label_delay_days: int = 2
+    attribution_horizon_days: int = 7
+    min_events_per_window: int = 500
+    psi_warn: float = 0.10
+    psi_alert: float = 0.25
+    js_warn: float = 0.10
+    js_alert: float = 0.20
+    performance_drop_warn: float = 0.10
+    performance_drop_alert: float = 0.20
+
+
 class AzureConfig(BaseModel):
     subscription_id: str = ""
     resource_group: str = "rg-amazon-recsys"
@@ -152,6 +167,18 @@ class AppSettings(BaseSettings):
     mlflow_experiment_name: str = "amazon-recsys"
     mlflow_backend_root: Path = Path("mlflow_runs")
     mlflow_run_name_prefix: str = ""
+    monitoring_enabled: bool = False
+    monitoring_root: Path = Path("artifacts/amazon_recsys/monitoring")
+    monitoring_window_days: int = 1
+    monitoring_label_delay_days: int = 2
+    monitoring_attribution_horizon_days: int = 7
+    monitoring_min_events_per_window: int = 500
+    monitoring_psi_warn: float = 0.10
+    monitoring_psi_alert: float = 0.25
+    monitoring_js_warn: float = 0.10
+    monitoring_js_alert: float = 0.20
+    monitoring_performance_drop_warn: float = 0.10
+    monitoring_performance_drop_alert: float = 0.20
 
     run_name: str = "default"
     run_profile: str = "debug"
@@ -265,6 +292,10 @@ class AppSettings(BaseSettings):
         return self._resolve_relative_path(Path(self.mlflow_backend_root))
 
     @property
+    def resolved_monitoring_root(self) -> Path:
+        return self._resolve_relative_path(Path(self.monitoring_root))
+
+    @property
     def resolved_mlflow_tracking_uri(self) -> str:
         raw = str(self.mlflow_tracking_uri).strip()
         if not raw:
@@ -356,6 +387,23 @@ class AppSettings(BaseSettings):
         )
 
     @property
+    def monitoring(self) -> MonitoringConfig:
+        return MonitoringConfig(
+            enabled=self.monitoring_enabled,
+            monitoring_root=self.resolved_monitoring_root,
+            window_days=self.monitoring_window_days,
+            label_delay_days=self.monitoring_label_delay_days,
+            attribution_horizon_days=self.monitoring_attribution_horizon_days,
+            min_events_per_window=self.monitoring_min_events_per_window,
+            psi_warn=self.monitoring_psi_warn,
+            psi_alert=self.monitoring_psi_alert,
+            js_warn=self.monitoring_js_warn,
+            js_alert=self.monitoring_js_alert,
+            performance_drop_warn=self.monitoring_performance_drop_warn,
+            performance_drop_alert=self.monitoring_performance_drop_alert,
+        )
+
+    @property
     def azure(self) -> AzureConfig:
         return AzureConfig(
             subscription_id=self.azure_subscription_id,
@@ -370,6 +418,7 @@ class AppSettings(BaseSettings):
         self.resolved_bundle_root.mkdir(parents=True, exist_ok=True)
         self.resolved_active_bundle_path.parent.mkdir(parents=True, exist_ok=True)
         self.resolved_mlflow_backend_root.mkdir(parents=True, exist_ok=True)
+        self.resolved_monitoring_root.mkdir(parents=True, exist_ok=True)
 
     def safe_config(self) -> dict[str, Any]:
         return {
@@ -385,6 +434,7 @@ class AppSettings(BaseSettings):
             "ranking": self.ranking.model_dump(mode="json"),
             "serving": self.serving.model_dump(mode="json"),
             "mlflow": self.mlflow.model_dump(mode="json"),
+            "monitoring": self.monitoring.model_dump(mode="json"),
             "azure": self.azure.model_dump(mode="json"),
             "legacy_artifact_root": str(self.legacy_artifact_root),
         }

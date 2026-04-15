@@ -94,3 +94,10 @@ class ModelSummaryResponse(BaseModel):
 class EvaluationSummaryResponse(BaseModel):
     source: str
     summary: dict[str, Any]
+
+
+class MonitoringSummaryResponse(BaseModel):
+    available: bool
+    bundle_version: str | None = None
+    status: str | None = None
+    summary: dict[str, Any] = Field(default_factory=dict)

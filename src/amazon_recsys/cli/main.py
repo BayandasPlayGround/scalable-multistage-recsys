@@ -29,6 +29,18 @@ def build_parser() -> argparse.ArgumentParser:
     activate = subparsers.add_parser("activate-bundle")
     activate.add_argument("version")
 
+    ingest = subparsers.add_parser("ingest-outcomes")
+    ingest.add_argument("--source", required=True)
+
+    monitor = subparsers.add_parser("monitor-drift")
+    monitor.add_argument("--window-start", required=True)
+    monitor.add_argument("--window-end", required=True)
+    monitor.add_argument("--bundle-version", default="active")
+
+    backfill = subparsers.add_parser("monitor-backfill")
+    backfill.add_argument("--days", type=int, required=True)
+    backfill.add_argument("--bundle-version", default="active")
+
     serve = subparsers.add_parser("serve")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
@@ -81,6 +93,25 @@ def main(argv: list[str] | None = None) -> int:
         pointer = container.artifact_store.activate_bundle(args.version)
         container.recommendation_service.refresh()
         print(json.dumps(pointer.to_dict(), indent=2))
+        return 0
+
+    if args.command == "ingest-outcomes":
+        payload = container.monitoring_service.ingest_outcomes(Path(args.source))
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    if args.command == "monitor-drift":
+        summary = container.monitoring_service.run_monitoring(
+            window_start=args.window_start,
+            window_end=args.window_end,
+            bundle_version=args.bundle_version,
+        )
+        print(json.dumps(summary.to_dict(), indent=2, default=str))
+        return 0
+
+    if args.command == "monitor-backfill":
+        summaries = container.monitoring_service.monitor_backfill(days=args.days, bundle_version=args.bundle_version)
+        print(json.dumps([summary.to_dict() for summary in summaries], indent=2, default=str))
         return 0
 
     if args.command == "serve":

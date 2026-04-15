@@ -10,6 +10,8 @@ from amazon_recsys.domain.entities import ActiveBundlePointer, BundleManifest, R
 from amazon_recsys.ml.bundles import build_bundle_manifest, build_runtime_bundle, generate_bundle_version
 from amazon_recsys.ml import core  # noqa: F401
 from amazon_recsys.ml.legacy import load_legacy_pipeline
+from amazon_recsys.monitoring.reference import build_reference_profile
+from amazon_recsys.monitoring.store import LocalMonitoringStore
 from amazon_recsys.observability.mlflow import MLflowTracker
 
 
@@ -18,6 +20,7 @@ class LocalArtifactStore:
         self.settings = settings
         self.settings.ensure_runtime_directories()
         self.mlflow_tracker = MLflowTracker(settings)
+        self.monitoring_store = LocalMonitoringStore(settings)
 
     def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +54,12 @@ class LocalArtifactStore:
         self._write_json(Path(manifest.manifest_path), manifest.to_dict())
         if manifest.evaluation_summary_path is not None:
             self._write_json(Path(manifest.evaluation_summary_path), runtime_bundle.evaluation_summary)
-        self.mlflow_tracker.log_bundle_export(session, manifest)
+        reference_profile = build_reference_profile(self.settings, session, bundle_version=manifest.version)
+        reference_profile_path = self.monitoring_store.save_reference_profile(reference_profile)
+        manifest.notes["reference_profile_path"] = str(reference_profile_path)
+        manifest.notes["reference_bundle_version"] = manifest.version
+        self._write_json(Path(manifest.manifest_path), manifest.to_dict())
+        self.mlflow_tracker.log_bundle_export(session, manifest, extra_artifacts=[reference_profile_path])
         return manifest
 
     def activate_bundle(self, version: str) -> ActiveBundlePointer:

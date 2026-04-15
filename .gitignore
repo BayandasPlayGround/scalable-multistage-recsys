@@ -9,6 +9,8 @@ notebooks/amazon_review_data
 artifacts/
 mlflow_probe_store/
 mlflow_runs/
+mlflow-monitoring*/
+mlflow-pytest-*/
 
 
 # C extensions

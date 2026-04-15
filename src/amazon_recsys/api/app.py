@@ -10,6 +10,7 @@ from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.web.router import router as web_router
 
 from .routers.health import router as health_router
+from .routers.monitoring import router as monitoring_router
 from .routers.models import router as models_router
 from .routers.recommendations import router as recommendations_router
 
@@ -27,6 +28,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.state.container = container
     app.include_router(health_router)
     app.include_router(models_router)
+    app.include_router(monitoring_router)
     app.include_router(recommendations_router)
     app.include_router(web_router)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

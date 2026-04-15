@@ -84,6 +84,15 @@ class MLflowTracker:
         mlflow.set_experiment(self.config.experiment_name)
         return True
 
+    def _configure_monitoring(self) -> bool:
+        if not self.enabled:
+            self._warn_if_unavailable()
+            return False
+        assert mlflow is not None
+        mlflow.set_tracking_uri(self.config.tracking_uri)
+        mlflow.set_experiment(f"{self.config.experiment_name}-monitoring")
+        return True
+
     def _run_name(self, phase: str) -> str:
         prefix = self.config.run_name_prefix.strip()
         base = f"{phase}-{self.settings.training.run_name}-{self.settings.training.run_profile}"
@@ -203,7 +212,7 @@ class MLflowTracker:
             self._log_metric_frames(Path(pipeline_config.eval_dir))
             return self._tracking_metadata(run.info.run_id)
 
-    def log_bundle_export(self, session: Any, manifest: Any) -> None:
+    def log_bundle_export(self, session: Any, manifest: Any, extra_artifacts: list[Path] | None = None) -> None:
         if not self._configure():
             return
         run_id = getattr(session, "mlflow_run_id", None)
@@ -219,3 +228,38 @@ class MLflowTracker:
                 }
             )
             self._log_artifacts_if_exists(Path(manifest.bundle_dir), artifact_path="bundle")
+            for artifact_path in extra_artifacts or []:
+                self._log_artifact_if_exists(Path(artifact_path), artifact_path="bundle")
+
+    def log_monitoring_summary(self, summary: Any, artifact_paths: dict[str, Path]) -> dict[str, str] | None:
+        if not self._configure_monitoring():
+            return None
+        assert mlflow is not None
+        with mlflow.start_run(run_name=f"monitor-{summary.bundle_version}-{summary.window_end}") as run:
+            mlflow.set_tags(
+                {
+                    "phase": "monitoring",
+                    "bundle_version": summary.bundle_version,
+                    "reference_bundle_version": summary.reference_bundle_version,
+                    "window_start": summary.window_start,
+                    "window_end": summary.window_end,
+                    "status": summary.status,
+                }
+            )
+            for key, value in self.settings.monitoring.model_dump(mode="json").items():
+                mlflow.log_param(f"monitoring.{key}", str(value)[:500])
+            mlflow.log_metric("drift.data.alert_count", float(sum(result.status in {"warn", "alert"} for result in summary.feature_drifts)))
+            for result in summary.feature_drifts:
+                metric_name = f"drift.data.{result.feature_name}.{result.metric_type}"
+                mlflow.log_metric(metric_name, float(result.metric_value))
+            for metric_name, metric_value in summary.concept_drift.metrics.items():
+                if metric_value is not None:
+                    mlflow.log_metric(f"drift.concept.{metric_name}", float(metric_value))
+            mlflow.log_metric("drift.concept.performance_drop", float(summary.concept_drift.performance_drop))
+            for path in artifact_paths.values():
+                self._log_artifact_if_exists(Path(path), artifact_path="monitoring")
+            return {
+                "run_id": run.info.run_id,
+                "experiment_name": f"{self.config.experiment_name}-monitoring",
+                "tracking_uri": self.config.tracking_uri,
+            }

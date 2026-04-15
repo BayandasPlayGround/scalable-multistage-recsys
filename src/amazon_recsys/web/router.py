@@ -55,10 +55,13 @@ def index(
     error = None
     active_model = service.readiness()
     evaluation_summary = {}
+    monitoring_summary = {}
     available_users = []
     try:
         active_model = service.get_active_model()
         evaluation_summary = service.get_evaluation_summary()
+        monitoring = request.app.state.container.monitoring_service.latest_summary()
+        monitoring_summary = monitoring.to_dict() if monitoring is not None else {}
         available_users = service.list_available_users(limit=250, min_history=3)
     except Exception as exc:
         error = str(exc)
@@ -76,6 +79,7 @@ def index(
         context={
             "active_model": active_model,
             "evaluation_summary": evaluation_summary,
+            "monitoring_summary": monitoring_summary,
             "recommendations": recommendations,
             "history": history,
             "available_users": available_users,

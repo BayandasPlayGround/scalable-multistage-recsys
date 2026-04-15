@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import AvailableUser, BundleManifest, HistoryItem, RecommendationItem, RuntimeBundle, utcnow_iso
 from amazon_recsys.infrastructure.artifacts import LocalArtifactStore
 from amazon_recsys.ml import core
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _mock_bundle(settings: AppSettings) -> RuntimeBundle:
@@ -34,9 +38,10 @@ def _mock_bundle(settings: AppSettings) -> RuntimeBundle:
 
 
 class BundleRecommendationService:
-    def __init__(self, artifact_store: LocalArtifactStore, settings: AppSettings) -> None:
+    def __init__(self, artifact_store: LocalArtifactStore, settings: AppSettings, monitoring_service: Any | None = None) -> None:
         self.artifact_store = artifact_store
         self.settings = settings
+        self.monitoring_service = monitoring_service
         self._bundle_cache: RuntimeBundle | None = None
         self._bundle_version: str | None = None
 
@@ -85,7 +90,7 @@ class BundleRecommendationService:
         effective_top_k = top_k or self.settings.serving.default_top_k
         if bundle.is_mock:
             seed_item = history_items[0] if history_items else "mock-item"
-            return [
+            items = [
                 RecommendationItem(
                     item_id=f"mock-{index}",
                     title=f"Mock recommendation {index} for {seed_item}",
@@ -98,6 +103,7 @@ class BundleRecommendationService:
                 )
                 for index in range(1, effective_top_k + 1)
             ]
+            return items
         frame = core.recommend(
             bundle.prepared,
             bundle.split_artifacts,
@@ -108,25 +114,38 @@ class BundleRecommendationService:
             top_k=effective_top_k,
         )
         if frame.empty:
-            return self._popularity_backfill(
+            items = self._popularity_backfill(
                 bundle=bundle,
                 user_id=user_id,
                 history_items=history_items,
                 top_k=effective_top_k,
             )
-        return [
-            RecommendationItem(
-                item_id=str(row["parent_asin"]),
-                title=str(row.get("title", "")),
-                source_category=str(row.get("source_category", "")),
-                price=float(row["price"]) if row.get("price") is not None else None,
-                average_rating=float(row["average_rating"]) if row.get("average_rating") is not None else None,
-                retrieval_score=float(row["retrieval_score"]) if row.get("retrieval_score") is not None else None,
-                score=float(row["score"]) if "score" in row and row.get("score") is not None else None,
-                candidate_sources=str(row.get("candidate_sources", "")) or None,
-            )
-            for row in frame.to_dict(orient="records")
-        ]
+        else:
+            items = [
+                RecommendationItem(
+                    item_id=str(row["parent_asin"]),
+                    title=str(row.get("title", "")),
+                    source_category=str(row.get("source_category", "")),
+                    price=float(row["price"]) if row.get("price") is not None else None,
+                    average_rating=float(row["average_rating"]) if row.get("average_rating") is not None else None,
+                    retrieval_score=float(row["retrieval_score"]) if row.get("retrieval_score") is not None else None,
+                    score=float(row["score"]) if "score" in row and row.get("score") is not None else None,
+                    candidate_sources=str(row.get("candidate_sources", "")) or None,
+                )
+                for row in frame.to_dict(orient="records")
+            ]
+        if self.monitoring_service is not None:
+            try:
+                self.monitoring_service.record_recommendation(
+                    bundle=bundle,
+                    user_id=user_id,
+                    history_items=history_items,
+                    top_k=effective_top_k,
+                    items=items,
+                )
+            except Exception:
+                LOGGER.exception("Failed to record recommendation inference for monitoring.")
+        return items
 
     def _popularity_backfill(
         self,
