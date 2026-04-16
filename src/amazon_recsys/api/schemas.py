@@ -64,6 +64,22 @@ class HistoryResponse(BaseModel):
     items: list[HistoryItemResponse]
 
 
+class UserProfileSummaryResponse(BaseModel):
+    user_id: str
+    interaction_count: int
+    history_length: int
+    last_ordered_at: str | None = None
+    average_review_rating: float | None = None
+    verified_purchase_rate: float | None = None
+    top_categories: list[str] = Field(default_factory=list)
+
+
+class UserProfileResponse(BaseModel):
+    profile: UserProfileSummaryResponse
+    history: list[HistoryItemResponse] = Field(default_factory=list)
+    recommendations: list[RecommendationItemResponse] = Field(default_factory=list)
+
+
 class AvailableUserResponse(BaseModel):
     user_id: str
     interaction_count: int
@@ -101,3 +117,8 @@ class MonitoringSummaryResponse(BaseModel):
     bundle_version: str | None = None
     status: str | None = None
     summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class MonitoringHistoryResponse(BaseModel):
+    total: int
+    items: list[dict[str, Any]] = Field(default_factory=list)

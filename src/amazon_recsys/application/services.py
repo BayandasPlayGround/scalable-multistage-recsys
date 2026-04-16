@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
+from statistics import mean
 from typing import Any
 
 from amazon_recsys.config.settings import AppSettings
-from amazon_recsys.domain.entities import AvailableUser, BundleManifest, HistoryItem, RecommendationItem, RuntimeBundle, utcnow_iso
+from amazon_recsys.domain.entities import (
+    AvailableUser,
+    BundleManifest,
+    HistoryItem,
+    RecommendationItem,
+    RuntimeBundle,
+    UserProfile,
+    utcnow_iso,
+)
 from amazon_recsys.infrastructure.artifacts import LocalArtifactStore
 from amazon_recsys.ml import core
 
@@ -88,6 +98,34 @@ class BundleRecommendationService:
     ) -> list[RecommendationItem]:
         bundle = self._load_bundle()
         effective_top_k = top_k or self.settings.serving.default_top_k
+        items = self._compute_recommendations(
+            bundle=bundle,
+            user_id=user_id,
+            history_items=history_items,
+            top_k=effective_top_k,
+        )
+        if self.monitoring_service is not None:
+            try:
+                self.monitoring_service.record_recommendation(
+                    bundle=bundle,
+                    user_id=user_id,
+                    history_items=history_items,
+                    top_k=effective_top_k,
+                    items=items,
+                )
+            except Exception:
+                LOGGER.exception("Failed to record recommendation inference for monitoring.")
+        return items
+
+    def _compute_recommendations(
+        self,
+        *,
+        bundle: RuntimeBundle,
+        user_id: str | None = None,
+        history_items: list[str] | None = None,
+        top_k: int,
+    ) -> list[RecommendationItem]:
+        effective_top_k = max(1, int(top_k))
         if bundle.is_mock:
             seed_item = history_items[0] if history_items else "mock-item"
             items = [
@@ -134,17 +172,6 @@ class BundleRecommendationService:
                 )
                 for row in frame.to_dict(orient="records")
             ]
-        if self.monitoring_service is not None:
-            try:
-                self.monitoring_service.record_recommendation(
-                    bundle=bundle,
-                    user_id=user_id,
-                    history_items=history_items,
-                    top_k=effective_top_k,
-                    items=items,
-                )
-            except Exception:
-                LOGGER.exception("Failed to record recommendation inference for monitoring.")
         return items
 
     def _popularity_backfill(
@@ -205,6 +232,50 @@ class BundleRecommendationService:
             )
             for row in history.to_dict(orient="records")
         ]
+
+    def get_user_profile(
+        self,
+        user_id: str,
+        *,
+        history_limit: int = 20,
+        recommendation_limit: int = 5,
+    ) -> dict[str, Any]:
+        bundle = self._load_bundle()
+        if bundle.is_mock:
+            raise KeyError(f"Unknown user_id: {user_id}")
+
+        history = self.get_user_history(user_id, limit=history_limit)
+        if not history:
+            raise KeyError(f"Unknown user_id: {user_id}")
+
+        available_user = next(
+            (item for item in self.list_available_users(limit=5000, min_history=0, query=user_id) if item.user_id == user_id),
+            None,
+        )
+
+        ratings = [item.review_rating for item in history if item.review_rating is not None]
+        verified = [item.verified_purchase for item in history if item.verified_purchase is not None]
+        category_counts = Counter(item.source_category for item in history if item.source_category)
+        profile = UserProfile(
+            user_id=user_id,
+            interaction_count=available_user.interaction_count if available_user is not None else len(history),
+            history_length=available_user.history_length if available_user is not None else len(history),
+            last_ordered_at=available_user.last_ordered_at if available_user is not None else history[0].ordered_at,
+            average_review_rating=mean(ratings) if ratings else None,
+            verified_purchase_rate=(sum(verified) / len(verified)) if verified else None,
+            top_categories=[name for name, _ in category_counts.most_common(3)],
+        )
+        recommendations = self._compute_recommendations(
+            bundle=bundle,
+            user_id=user_id,
+            history_items=None,
+            top_k=recommendation_limit,
+        )
+        return {
+            "profile": profile,
+            "history": history,
+            "recommendations": recommendations,
+        }
 
     def list_available_users(
         self,

@@ -11,6 +11,8 @@ from amazon_recsys.api.schemas import (
     RecommendationItemResponse,
     RecommendationRequest,
     RecommendationResponse,
+    UserProfileResponse,
+    UserProfileSummaryResponse,
 )
 from amazon_recsys.application.services import BundleRecommendationService
 
@@ -75,4 +77,28 @@ def user_history(
     return HistoryResponse(
         user_id=user_id,
         items=[HistoryItemResponse(**asdict(item)) for item in items],
+    )
+
+
+@router.get("/users/{user_id}/profile", response_model=UserProfileResponse)
+def user_profile(
+    user_id: str,
+    history_limit: int = 20,
+    recommendation_limit: int = 5,
+    service: BundleRecommendationService = Depends(get_recommendation_service),
+) -> UserProfileResponse:
+    try:
+        payload = service.get_user_profile(
+            user_id,
+            history_limit=history_limit,
+            recommendation_limit=recommendation_limit,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return UserProfileResponse(
+        profile=UserProfileSummaryResponse(**asdict(payload["profile"])),
+        history=[HistoryItemResponse(**asdict(item)) for item in payload["history"]],
+        recommendations=[RecommendationItemResponse(**asdict(item)) for item in payload["recommendations"]],
     )

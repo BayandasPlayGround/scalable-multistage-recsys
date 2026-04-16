@@ -35,13 +35,13 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     assert payload["source"] == "mock"
     assert len(payload["items"]) == 3
     assert users_response.json()["items"] == []
-    assert "Amazon RecSys" in page_response.text
+    assert "Amazon RecSys Analyst Console" in page_response.text
     assert "available-users" in page_response.text
     assert "data-local-shutdown" in page_response.text
     assert "/static/favicon.svg?v=" in page_response.text
     assert "/static/style.css?v=" in page_response.text
     assert "/static/app.js?v=" in page_response.text
     assert "data-enhanced-form" in page_response.text
-    assert "Deep-dive workspace" in page_response.text
-    assert 'data-tab-group="insights"' in page_response.text
-    assert 'data-tab-target="monitoring"' in page_response.text
+    assert "Analyst Workflow Modes" in page_response.text
+    assert 'data-tab-group="workspace"' in page_response.text
+    assert 'data-tab-target="monitoring-workspace"' in page_response.text

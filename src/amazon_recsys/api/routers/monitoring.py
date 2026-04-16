@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 from amazon_recsys.api.dependencies import get_monitoring_service
-from amazon_recsys.api.schemas import MonitoringSummaryResponse
+from amazon_recsys.api.schemas import MonitoringHistoryResponse, MonitoringSummaryResponse
 from amazon_recsys.monitoring.service import MonitoringService
 
 
@@ -24,3 +24,16 @@ def drift_summary(
         status=summary.status,
         summary=summary.to_dict(),
     )
+
+
+@router.get("/monitoring/drift/history", response_model=MonitoringHistoryResponse)
+def drift_history(
+    limit: int = 8,
+    service: MonitoringService = Depends(get_monitoring_service),
+) -> MonitoringHistoryResponse:
+    try:
+        items = service.recent_summaries(limit=limit)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    payload = [item.to_dict() for item in items]
+    return MonitoringHistoryResponse(total=len(payload), items=payload)

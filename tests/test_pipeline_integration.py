@@ -46,5 +46,5 @@ def test_training_bundle_round_trip(test_container) -> None:
     assert users_response.json()["items"][0]["user_id"] in {"u1", "u2", "u3", "u4"}
     assert active_response.json()["version"] == "fixture-bundle"
     assert "available-users" in page_response.text
-    assert 'data-filter-table="recommendations"' in page_response.text
-    assert 'data-filter-table="users"' in page_response.text
+    assert 'data-filter-table="qa-results"' in page_response.text
+    assert 'data-filter-table="analysis-users"' in page_response.text

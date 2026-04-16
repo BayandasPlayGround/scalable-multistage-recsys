@@ -1,0 +1,603 @@
+﻿{% extends "base.html" %}
+{% block content %}
+{% set model_status = active_model.status if active_model.status is defined else ("ready" if active_model.ready else "not_ready") %}
+{% set metric_files = evaluation_summary.metric_files if evaluation_summary.metric_files is defined else [] %}
+{% set drift_status = monitoring_summary.status if monitoring_summary.status is defined else "unavailable" %}
+{% set drift_features = monitoring_summary.top_drifting_features if monitoring_summary.top_drifting_features is defined else [] %}
+{% set feature_drifts = monitoring_summary.feature_drifts if monitoring_summary.feature_drifts is defined else [] %}
+{% set concept_drift = monitoring_summary.concept_drift if monitoring_summary.concept_drift is defined else {} %}
+{% set concept_k = concept_drift.monitored_k if concept_drift.monitored_k is defined else 10 %}
+{% set hit_key = "hit_rate_at_" ~ concept_k %}
+{% set ndcg_key = "ndcg_at_" ~ concept_k %}
+{% set mrr_key = "mrr_at_" ~ concept_k %}
+{% set purchase_key = "purchase_rate_at_" ~ concept_k %}
+{% set cold_start_key = "cold_start_hit_rate_at_" ~ concept_k %}
+{% set latest_monitoring_index = (monitoring_history | length) - 1 if monitoring_history else 0 %}
+{% set query_context = user_id if user_id else ("history override" if history_items else "no live query") %}
+
+{% macro histogram_row(label, values, tone_class) -%}
+  <div class="histogram-row">
+    <span class="histogram-row-label">{{ label }}</span>
+    <div class="histogram-bars">
+      {% for value in values %}
+      {% set bar_height = (value * 100) if (value * 100) > 10 else 10 %}
+      <span class="histogram-bar {{ tone_class }}" style="height: {{ "%.1f"|format(bar_height) }}%;" title="{{ "%.3f"|format(value) }}"></span>
+      {% endfor %}
+    </div>
+  </div>
+{%- endmacro %}
+
+{% macro mix_row(label, entries, tone_class) -%}
+  <div class="mix-row">
+    <span class="mix-row-label">{{ label }}</span>
+    <div class="mix-bars">
+      {% for entry in entries %}
+      <div class="mix-bar-block">
+        <span class="mix-bar-label">{{ entry.label | replace("_", " ") }}</span>
+        <div class="mix-bar-track">
+          <span class="mix-bar-fill {{ tone_class }}" style="width: {{ "%.1f"|format(entry.value * 100) }}%;"></span>
+        </div>
+        <span class="mix-bar-value">{{ "%.0f"|format(entry.value * 100) }}%</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+{%- endmacro %}
+
+{% macro format_trend_value(value, value_format) -%}
+  {% if value is none %}
+    n/a
+  {% elif value_format == "percent" %}
+    {{ "%.1f"|format(value * 100) }}%
+  {% elif value_format == "count" %}
+    {{ value|int }}
+  {% else %}
+    {{ "%.3f"|format(value) }}
+  {% endif %}
+{%- endmacro %}
+
+{% macro trend_card(card) -%}
+  {% set tone_class = "is-alert" if card.tone == "alert" else "is-current" %}
+  <article class="trend-card">
+    <div class="trend-card-head">
+      <div>
+        <span class="comparison-kicker">{{ card.title }}</span>
+        <strong class="trend-card-value">{{ format_trend_value(card.latest, card.format) }}</strong>
+      </div>
+      {% if card.delta is not none %}
+      <span class="trend-delta {% if card.delta < 0 %}is-negative{% elif card.delta > 0 %}is-positive{% endif %}">{{ format_trend_value(card.delta, card.format) }} vs prior</span>
+      {% endif %}
+    </div>
+    <div class="sparkline-frame">
+      <svg class="sparkline-chart" viewBox="0 0 152 44" preserveAspectRatio="none" aria-hidden="true">
+        <polyline class="sparkline-path {{ tone_class }}" points="{{ card.points }}"></polyline>
+      </svg>
+    </div>
+    <div class="sparkline-labels">
+      <span>{{ card.labels[0] if card.labels else "n/a" }}</span>
+      <span>{{ card.labels[-1] if card.labels else "n/a" }}</span>
+    </div>
+  </article>
+{%- endmacro %}
+
+{% macro concept_metric_card(title, metric_key, summary) -%}
+  {% set concept = summary.concept_drift if summary.concept_drift is defined else {} %}
+  {% set current = concept.metrics.get(metric_key) if concept.metrics is defined else none %}
+  {% set baseline = concept.baseline_metrics.get(metric_key) if concept.baseline_metrics is defined else none %}
+  {% set previous = concept.previous_metrics.get(metric_key) if concept.previous_metrics is defined else none %}
+  {% set baseline_delta = concept.deltas.get(metric_key) if concept.deltas is defined else none %}
+  {% set previous_delta = (current - previous) if current is not none and previous is not none else none %}
+  <article class="comparison-card">
+    <span class="comparison-kicker">{{ title }}</span>
+    <strong class="comparison-value">{{ "%.3f"|format(current) if current is not none else "n/a" }}</strong>
+    <span class="comparison-baseline" data-compare-value="baseline">Offline baseline {{ "%.3f"|format(baseline) if baseline is not none else "n/a" }}</span>
+    <span class="comparison-baseline" data-compare-value="previous">Previous window {{ "%.3f"|format(previous) if previous is not none else "n/a" }}</span>
+    <span class="comparison-delta {% if baseline_delta is not none and baseline_delta < 0 %}is-negative{% elif baseline_delta is not none and baseline_delta > 0 %}is-positive{% endif %}" data-compare-value="baseline">{% if baseline_delta is not none %}{{ "%+.3f"|format(baseline_delta) }} vs offline baseline{% else %}Baseline delta unavailable{% endif %}</span>
+    <span class="comparison-delta {% if previous_delta is not none and previous_delta < 0 %}is-negative{% elif previous_delta is not none and previous_delta > 0 %}is-positive{% endif %}" data-compare-value="previous">{% if previous_delta is not none %}{{ "%+.3f"|format(previous_delta) }} vs prior window{% else %}Prior-window delta unavailable{% endif %}</span>
+  </article>
+{%- endmacro %}
+
+{% macro drift_story(feature) -%}
+  {% if not feature %}Monitoring is active, but no dominant drift story has emerged yet.
+  {% elif "price" in feature.feature_name %}Serving price mix shifted upward relative to the reference bundle. Inspect catalog mix and traffic-source changes first.
+  {% elif "rating" in feature.feature_name %}Average rating exposure moved materially. Validate whether serving is over-indexing on different trust bands.
+  {% elif "category" in feature.feature_name %}Category mix changed meaningfully. Check whether audience composition or bundle scope moved since export.
+  {% elif "source" in feature.feature_name %}Candidate-source balance changed. Review retriever participation and fallback behaviour for this window.
+  {% else %}Start with {{ feature.feature_name | replace("_", " ") }}. It is the clearest movement away from the reference profile.
+  {% endif %}
+{%- endmacro %}
+
+<section class="decision-layer">
+  <article class="hero-card hero-card-main">
+    <p class="section-kicker">Azure-First Recommender Platform</p>
+    <h1>Amazon RecSys Analyst Console</h1>
+    <p class="hero-lead">A task-first control surface for recommendation QA, user-level inspection, and operational monitoring. The interface is structured around how analysts actually work: decide, inspect, compare, and escalate.</p>
+    <div class="hero-actions">
+      <a class="button-primary" href="#qa-workspace" data-tab-link="qa-workspace" data-tab-group-name="workspace" data-tab-section="workspace-modes">Open Recommendation QA</a>
+      <a class="button-secondary" href="#monitoring-workspace" data-tab-link="monitoring-workspace" data-tab-group-name="workspace" data-tab-section="workspace-modes">Review Monitoring</a>
+    </div>
+  </article>
+  <div class="decision-stack">
+    <article class="decision-card"><span class="stat-label">Active Bundle</span><strong class="decision-value">{{ active_model.version or "No active bundle" }}</strong><div class="status-row"><span class="status-pill {% if model_status == 'ready' %}is-ready{% else %}is-alert{% endif %}">{{ model_status | replace("_", " ") }}</span><span class="source-pill">{{ active_model.model_backend if active_model.model_backend is defined else "n/a" }}</span></div></article>
+    <article class="decision-card"><span class="stat-label">Operational Risk</span><strong class="decision-value">{{ drift_status | replace("_", " ") }}</strong><p class="stat-note">{% if drift_features %}Top driver: {{ drift_features[0] | replace("_", " ") }}{% else %}Monitoring summary will appear after the first completed window.{% endif %}</p></article>
+    <article class="decision-card"><span class="stat-label">Query Context</span><strong class="decision-value">{{ query_context }}</strong><p class="stat-note">{{ recommendations | length }} ranked items currently in focus.</p></article>
+    <article class="decision-card"><span class="stat-label">Monitoring Freshness</span><strong class="decision-value">{{ monitoring_summary.window_end if monitoring_summary.window_end is defined else "n/a" }}</strong><p class="stat-note">{{ monitoring_history | length }} recent monitoring windows loaded into the console.</p></article>
+  </div>
+</section>
+
+<section class="stats-grid stats-grid-compact">
+  <article class="stat-card"><span class="stat-label">Searchable Users</span><strong class="stat-value">{{ available_users | length }}</strong><span class="stat-note">Available for analyst QA and user analysis.</span></article>
+  <article class="stat-card"><span class="stat-label">Current Results</span><strong class="stat-value">{{ recommendations | length }}</strong><span class="stat-note">Live recommendation rows in the workbench.</span></article>
+  <article class="stat-card"><span class="stat-label">Metric Files</span><strong class="stat-value">{{ metric_files | length }}</strong><span class="stat-note">Offline diagnostics packaged in the active bundle.</span></article>
+  <article class="stat-card"><span class="stat-label">Retriever Variants</span><strong class="stat-value">{{ active_model.retriever_variants | length if active_model.retriever_variants is defined else 0 }}</strong><span class="stat-note">Candidate generators participating in inference.</span></article>
+</section>
+
+{% if error %}
+<div class="alert-banner">{{ error }}</div>
+{% endif %}
+
+<section class="panel workspace-frame" id="workspace-modes" data-tab-group="workspace" data-default-tab="overview-workspace">
+  <div class="panel-head workspace-frame-head">
+    <div>
+      <p class="section-kicker">Analyst Workflow Modes</p>
+      <h2>Switch between decision, QA, user analysis, and monitoring views</h2>
+    </div>
+    <div class="tab-bar workspace-switcher" role="tablist" aria-label="Workspace modes">
+      <button class="tab-button is-active" id="overview-workspace-tab" type="button" role="tab" aria-selected="true" aria-controls="overview-workspace" data-tab-target="overview-workspace" data-tab-group-name="workspace">Overview</button>
+      <button class="tab-button" id="qa-workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="qa-workspace" data-tab-target="qa-workspace" data-tab-group-name="workspace">Recommendation QA</button>
+      <button class="tab-button" id="analysis-workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="analysis-workspace" data-tab-target="analysis-workspace" data-tab-group-name="workspace">User Analysis</button>
+      <button class="tab-button" id="monitoring-workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="monitoring-workspace" data-tab-target="monitoring-workspace" data-tab-group-name="workspace">Operational Monitoring</button>
+    </div>
+  </div>
+
+  <div class="workspace-mode is-active" id="overview-workspace" role="tabpanel" aria-labelledby="overview-workspace-tab" data-tab-panel="overview-workspace" data-tab-group-name="workspace">
+    <div class="overview-grid">
+      <article class="panel overview-card">
+        <div class="panel-head"><div><p class="section-kicker">Decision Layer</p><h2>What matters right now</h2></div></div>
+        <div class="mini-metric-list">
+          <div class="mini-metric"><span>Bundle readiness</span><strong>{{ model_status | replace("_", " ") }}</strong></div>
+          <div class="mini-metric"><span>Monitoring severity</span><strong>{{ drift_status | replace("_", " ") }}</strong></div>
+          <div class="mini-metric"><span>Current query focus</span><strong>{{ query_context }}</strong></div>
+          <div class="mini-metric"><span>Selected analyst user</span><strong>{{ selected_user_id or "none selected" }}</strong></div>
+        </div>
+      </article>
+
+      <article class="panel overview-card">
+        <div class="panel-head"><div><p class="section-kicker">Next Best Actions</p><h2>Move directly into the right workflow</h2></div></div>
+        <div class="action-grid">
+          <a class="action-card" href="#qa-workspace" data-tab-link="qa-workspace" data-tab-group-name="workspace" data-tab-section="workspace-modes"><strong>Run QA</strong><span>Inspect ranked outputs, candidate provenance, and item metadata.</span></a>
+          <a class="action-card" href="#analysis-workspace" data-tab-link="analysis-workspace" data-tab-group-name="workspace" data-tab-section="workspace-modes"><strong>Inspect a user</strong><span>Load a trained user profile, history timeline, and preview recommendations.</span></a>
+          <a class="action-card" href="#monitoring-workspace" data-tab-link="monitoring-workspace" data-tab-group-name="workspace" data-tab-section="workspace-modes"><strong>Review drift</strong><span>See the latest operational monitoring window, recent trends, and top drifting features.</span></a>
+        </div>
+      </article>
+
+      <article class="panel overview-card">
+        <div class="panel-head"><div><p class="section-kicker">Operational Story</p><h2>Analyst interpretation</h2></div></div>
+        <p class="overview-story">{{ drift_story(feature_drifts[0] if feature_drifts else none) }}</p>
+        <div class="pill-group">{% for feature in drift_features[:4] %}<span class="data-pill">{{ feature | replace("_", " ") }}</span>{% endfor %}</div>
+      </article>
+    </div>
+  </div>
+
+  <div class="workspace-mode" id="qa-workspace" role="tabpanel" aria-labelledby="qa-workspace-tab" data-tab-panel="qa-workspace" data-tab-group-name="workspace" hidden>
+    <div class="qa-layout">
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Recommendation QA</p>
+            <h2>Run a live recommendation query</h2>
+          </div>
+          <span class="panel-badge">Top K {{ top_k }}</span>
+        </div>
+
+        <form class="query-form" method="get" action="/" data-enhanced-form>
+          <input type="hidden" name="selected_user_id" value="{{ selected_user_id }}" />
+          <div class="form-grid">
+            <label class="field">
+              <span class="field-label">Known user ID</span>
+              <input type="text" name="user_id" value="{{ user_id }}" list="available-users" placeholder="Search a trained user id" />
+              <span class="field-help">Known-user mode is the fastest path for QA. Use the picker below when you want a guided start.</span>
+              <datalist id="available-users">
+                {% for user in available_users %}
+                <option value="{{ user.user_id }}">{{ user.interaction_count }} interactions | history {{ user.history_length }}{% if user.last_ordered_at %} | last {{ user.last_ordered_at }}{% endif %}</option>
+                {% endfor %}
+              </datalist>
+            </label>
+            <label class="field">
+              <span class="field-label">History items override</span>
+              <input type="text" name="history_items" value="{{ history_items }}" placeholder="ASIN1, ASIN2 or ASIN1+ASIN2" />
+              <span class="field-help">Cold-start mode is forgiving: commas, plus signs, and extra spacing are all accepted.</span>
+            </label>
+            <label class="field field-compact">
+              <span class="field-label">Top K</span>
+              <input type="number" min="1" max="50" name="top_k" value="{{ top_k }}" />
+              <span class="field-help">Return size for the ranked list.</span>
+            </label>
+          </div>
+
+          <div class="quick-pick-block">
+            <span class="field-label">Quick QA users</span>
+            {% if available_users %}
+            <div class="quick-picks">
+              {% for user in available_users[:10] %}
+              <a class="quick-user {% if user.user_id == user_id %}is-selected{% endif %}" data-enhanced-nav href="/?user_id={{ user.user_id }}&selected_user_id={{ user.user_id }}&top_k={{ top_k }}#qa-workspace">
+                {{ user.user_id[:16] }}{% if user.user_id|length > 16 %}...{% endif %}
+              </a>
+              {% endfor %}
+            </div>
+            <p class="field-help">High-history users are surfaced here so recommendation QA starts with stronger evidence.</p>
+            {% else %}
+            <p class="field-help">No trained users are available yet. Activate a real bundle first.</p>
+            {% endif %}
+          </div>
+
+          <div class="query-actions">
+            <button class="button-primary" type="submit">Run Recommendation Query</button>
+            <a class="button-secondary" data-enhanced-nav href="/{% if selected_user_id %}?selected_user_id={{ selected_user_id }}{% endif %}#qa-workspace">Clear Query</a>
+          </div>
+        </form>
+      </article>
+
+      <div class="content-grid qa-results-shell">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">Ranked Output</p>
+              <h2>Recommendation results with provenance and expandable detail</h2>
+            </div>
+            <span class="panel-badge">{{ recommendations | length }} rows</span>
+          </div>
+
+          <div class="table-toolbar">
+            <label class="toolbar-field">
+              <span class="toolbar-label">Search</span>
+              <input type="text" placeholder="Filter by title or item id" data-table-search="qa-results" />
+            </label>
+            <label class="toolbar-field toolbar-field-compact">
+              <span class="toolbar-label">Category</span>
+              <select data-table-select="qa-results" data-filter-key="category">
+                <option value="">All categories</option>
+              </select>
+            </label>
+            <label class="toolbar-field toolbar-field-compact">
+              <span class="toolbar-label">Source</span>
+              <select data-table-select="qa-results" data-filter-key="sources">
+                <option value="">All candidate sources</option>
+              </select>
+            </label>
+            <div class="toolbar-summary">
+              <span class="toolbar-count" data-table-count="qa-results">{{ recommendations | length }} shown</span>
+            </div>
+          </div>
+
+          {% if recommendations %}
+          <div class="table-wrap table-wrap-sticky table-wrap-recommendations">
+            <table class="data-table data-table-recommendations" data-filter-table="qa-results" data-sort-table="qa-results">
+              <thead>
+                <tr>
+                  <th><button class="sort-button is-active" type="button" data-sort-trigger="qa-results" data-sort-key="title" data-sort-type="text" data-sort-default="true" data-sort-default-direction="asc">Recommended item</button></th>
+                  <th><button class="sort-button" type="button" data-sort-trigger="qa-results" data-sort-key="category" data-sort-type="text">Category</button></th>
+                  <th><button class="sort-button" type="button" data-sort-trigger="qa-results" data-sort-key="price" data-sort-type="number">Price</button></th>
+                  <th><button class="sort-button" type="button" data-sort-trigger="qa-results" data-sort-key="rating" data-sort-type="number">Rating</button></th>
+                  <th><button class="sort-button" type="button" data-sort-trigger="qa-results" data-sort-key="sources" data-sort-type="text">Candidate sources</button></th>
+                  <th><button class="sort-button" type="button" data-sort-trigger="qa-results" data-sort-key="score" data-sort-type="number">Score</button></th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for item in recommendations %}
+                <tr data-table-row="qa-results" data-search="{{ (item.title ~ ' ' ~ item.item_id) | lower }}" data-category="{{ item.source_category | lower }}" data-sources="{{ (item.candidate_sources or '') | lower }}" data-title="{{ item.title | lower }}" data-price="{{ item.price if item.price is not none else -1 }}" data-rating="{{ item.average_rating if item.average_rating is not none else -1 }}" data-score="{{ item.score if item.score is not none else -999999 }}">
+                  <td class="item-cell">
+                    <span class="item-title">{{ item.title }}</span>
+                    <span class="item-meta">{{ item.item_id }}</span>
+                    <details class="row-details">
+                      <summary>Inspect detail</summary>
+                      <div class="row-details-body">
+                        <div class="snapshot-line">Retrieval score <span>{{ "%.3f"|format(item.retrieval_score) if item.retrieval_score is not none else "n/a" }}</span></div>
+                        <div class="snapshot-line">Rank score <span>{{ "%.3f"|format(item.score) if item.score is not none else "n/a" }}</span></div>
+                        <div class="snapshot-line">Price <span>{{ "$%.2f"|format(item.price) if item.price is not none else "n/a" }}</span></div>
+                        <div class="snapshot-line">Average rating <span>{{ "%.1f"|format(item.average_rating) if item.average_rating is not none else "n/a" }}</span></div>
+                      </div>
+                    </details>
+                  </td>
+                  <td><span class="data-pill">{{ item.source_category | replace("_", " ") }}</span></td>
+                  <td class="numeric-column">{{ "$%.2f"|format(item.price) if item.price is not none else "n/a" }}</td>
+                  <td class="numeric-column">{{ "%.1f"|format(item.average_rating) if item.average_rating is not none else "n/a" }}</td>
+                  <td class="source-cell">{{ item.candidate_sources or "n/a" }}</td>
+                  <td class="numeric-column"><span class="score-chip">{{ "%.3f"|format(item.score) if item.score is not none else "n/a" }}</span></td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="table-empty-message" data-table-empty="qa-results" hidden>No ranked items match the current QA filters.</div>
+          {% else %}
+          <div class="empty-state empty-state-compact"><strong>No recommendation query is currently loaded.</strong><p>Choose a trained user or provide a history override, then run the workbench query.</p></div>
+          {% endif %}
+        </article>
+
+        <article class="panel qa-context-card">
+          <div class="panel-head"><div><p class="section-kicker">Compare Next To History</p><h2>Prior behaviour stays beside the ranked output</h2></div></div>
+          {% if history %}
+          <div class="mini-metric-list">
+            <div class="mini-metric"><span>Query user</span><strong>{{ user_id }}</strong></div>
+            <div class="mini-metric"><span>Known history rows</span><strong>{{ history | length }}</strong></div>
+            <div class="mini-metric"><span>Selected analysis user</span><strong>{{ selected_user_id or user_id }}</strong></div>
+          </div>
+          <div class="table-wrap table-wrap-sticky table-wrap-history">
+            <table class="data-table data-table-history">
+              <thead><tr><th>Ordered</th><th>Item</th><th>Rating</th></tr></thead>
+              <tbody>
+                {% for item in history[:10] %}
+                <tr><td>{{ item.ordered_at }}</td><td class="item-cell"><span class="item-title">{{ item.title }}</span><span class="item-meta">{{ item.item_id }}</span></td><td class="numeric-column">{{ "%.1f"|format(item.review_rating) if item.review_rating is not none else "n/a" }}</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% else %}
+          <div class="empty-state empty-state-compact"><strong>No query-side history is loaded yet.</strong><p>Run a known-user query to compare ranked items against prior purchases and reviews in the same workspace.</p></div>
+          {% endif %}
+        </article>
+      </div>
+    </div>
+  </div>
+
+  <div class="workspace-mode" id="analysis-workspace" role="tabpanel" aria-labelledby="analysis-workspace-tab" data-tab-panel="analysis-workspace" data-tab-group-name="workspace" hidden>
+    <div class="analysis-layout">
+      <article class="panel analysis-list-panel">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">User Analysis</p>
+            <h2>Search the trained user base</h2>
+          </div>
+          <span class="panel-badge">{{ available_users | length }} loaded</span>
+        </div>
+
+        <div class="table-toolbar">
+          <label class="toolbar-field">
+            <span class="toolbar-label">Search</span>
+            <input type="text" placeholder="Filter by user id" data-table-search="analysis-users" />
+          </label>
+          <label class="toolbar-field toolbar-field-compact">
+            <span class="toolbar-label">Min interactions</span>
+            <input type="number" min="0" value="0" data-table-min="analysis-users" data-filter-key="interactionCount" />
+          </label>
+          <label class="toolbar-field toolbar-field-compact">
+            <span class="toolbar-label">Min history</span>
+            <input type="number" min="0" value="0" data-table-min="analysis-users" data-filter-key="historyLength" />
+          </label>
+        </div>
+
+        <div class="table-wrap table-wrap-sticky table-wrap-users">
+          <table class="data-table data-table-users" data-filter-table="analysis-users" data-sort-table="analysis-users">
+            <thead>
+              <tr>
+                <th><button class="sort-button is-active" type="button" data-sort-trigger="analysis-users" data-sort-key="user" data-sort-type="text" data-sort-default="true" data-sort-default-direction="asc">User</button></th>
+                <th><button class="sort-button" type="button" data-sort-trigger="analysis-users" data-sort-key="interactionCount" data-sort-type="number">Interactions</button></th>
+                <th><button class="sort-button" type="button" data-sort-trigger="analysis-users" data-sort-key="historyLength" data-sort-type="number">History</button></th>
+                <th><button class="sort-button" type="button" data-sort-trigger="analysis-users" data-sort-key="lastSeen" data-sort-type="text">Last seen</button></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for user in available_users %}
+              <tr data-table-row="analysis-users" data-search="{{ user.user_id | lower }}" data-user="{{ user.user_id | lower }}" data-interaction-count="{{ user.interaction_count }}" data-history-length="{{ user.history_length }}" data-last-seen="{{ user.last_ordered_at or '' }}">
+                <td class="item-cell"><a class="table-link user-link {% if user.user_id == selected_user_id %}is-selected-link{% endif %}" title="{{ user.user_id }}" data-enhanced-nav href="/?selected_user_id={{ user.user_id }}{% if user_id %}&user_id={{ user_id }}{% endif %}&top_k={{ top_k }}#analysis-workspace">{{ user.user_id }}</a></td>
+                <td class="numeric-column">{{ user.interaction_count }}</td>
+                <td class="numeric-column">{{ user.history_length }}</td>
+                <td>{{ user.last_ordered_at or "n/a" }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="table-empty-message" data-table-empty="analysis-users" hidden>No trained users match the current filters.</div>
+      </article>
+
+      <article class="panel analysis-detail-panel">
+        {% if selected_user_profile %}
+        <div class="profile-hero">
+          <div>
+            <p class="section-kicker">Master Detail</p>
+            <h2>{{ selected_user_profile.user_id }}</h2>
+            <p class="subtle">A single analyst view of user profile, history timeline, and recommendation preview.</p>
+          </div>
+          <div class="hero-actions">
+            <a class="button-primary" data-enhanced-nav href="/?user_id={{ selected_user_profile.user_id }}&selected_user_id={{ selected_user_profile.user_id }}&top_k={{ top_k }}#qa-workspace">Run QA for this user</a>
+            <a class="button-secondary" data-enhanced-nav href="/#analysis-workspace">Clear selection</a>
+          </div>
+        </div>
+
+        <div class="profile-stat-grid">
+          <article class="stat-card"><span class="stat-label">Interactions</span><strong class="stat-value">{{ selected_user_profile.interaction_count }}</strong><span class="stat-note">Total interactions known to the bundle.</span></article>
+          <article class="stat-card"><span class="stat-label">History Length</span><strong class="stat-value">{{ selected_user_profile.history_length }}</strong><span class="stat-note">Rows available for inspection.</span></article>
+          <article class="stat-card"><span class="stat-label">Avg Review Rating</span><strong class="stat-value">{{ "%.2f"|format(selected_user_profile.average_review_rating) if selected_user_profile.average_review_rating is not none else "n/a" }}</strong><span class="stat-note">Mean explicit review signal for the selected user.</span></article>
+          <article class="stat-card"><span class="stat-label">Verified Purchase Rate</span><strong class="stat-value">{{ "%.0f"|format((selected_user_profile.verified_purchase_rate or 0) * 100) }}%</strong><span class="stat-note">Share of observed history rows marked verified.</span></article>
+        </div>
+
+        <div class="pill-group">{% for category in selected_user_profile.top_categories %}<span class="data-pill">{{ category | replace("_", " ") }}</span>{% endfor %}</div>
+
+        <div class="detail-grid">
+          <div class="detail-panel">
+            <div class="panel-head"><div><p class="section-kicker">History Timeline</p><h2>Recent user behaviour</h2></div></div>
+            <div class="timeline-list">
+              {% for item in selected_user_history[:10] %}
+              <article class="timeline-item">
+                <div class="timeline-date">{{ item.ordered_at }}</div>
+                <div class="timeline-body">
+                  <strong>{{ item.title }}</strong>
+                  <span class="item-meta">{{ item.item_id }}</span>
+                  <div class="snapshot-line">Rating <span>{{ "%.1f"|format(item.review_rating) if item.review_rating is not none else "n/a" }}</span></div>
+                </div>
+              </article>
+              {% endfor %}
+            </div>
+          </div>
+
+          <div class="detail-panel">
+            <div class="panel-head"><div><p class="section-kicker">Recommendation Preview</p><h2>What the bundle would serve next</h2></div></div>
+            {% if selected_user_recommendations %}
+            <div class="table-wrap table-wrap-sticky table-wrap-analysis">
+              <table class="data-table">
+                <thead><tr><th>Item</th><th>Source</th><th>Score</th></tr></thead>
+                <tbody>
+                  {% for item in selected_user_recommendations %}
+                  <tr><td class="item-cell"><span class="item-title">{{ item.title }}</span><span class="item-meta">{{ item.item_id }}</span></td><td>{{ item.candidate_sources or "n/a" }}</td><td class="numeric-column">{{ "%.3f"|format(item.score) if item.score is not none else "n/a" }}</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+            <div class="empty-state empty-state-compact"><strong>No preview recommendations are available for the selected user.</strong><p>Try a known-user QA query to force a fresh recommendation request.</p></div>
+            {% endif %}
+          </div>
+        </div>
+        {% else %}
+        <div class="empty-state"><strong>No user is loaded into the inspector yet.</strong><p>Select a trained user from the list to open a master-detail analysis view with history, profile metrics, and recommendation preview.</p></div>
+        {% endif %}
+      </article>
+    </div>
+  </div>
+
+  <div class="workspace-mode" id="monitoring-workspace" role="tabpanel" aria-labelledby="monitoring-workspace-tab" data-tab-panel="monitoring-workspace" data-tab-group-name="workspace" hidden>
+    <article class="panel monitoring-control-room" data-monitoring-shell data-default-window="{{ latest_monitoring_index }}" data-compare-mode="baseline">
+      <div class="panel-head">
+        <div>
+          <p class="section-kicker">Operational Monitoring</p>
+          <h2>Control room for drift review and window-level comparison</h2>
+        </div>
+        <div class="monitoring-toolbar">
+          <label class="toolbar-field toolbar-field-compact">
+            <span class="toolbar-label">Monitoring window</span>
+            <select data-monitoring-window-select>
+              {% for summary in monitoring_history %}
+              <option value="{{ loop.index0 }}" {% if loop.index0 == latest_monitoring_index %}selected{% endif %}>{{ summary.window_end if summary.window_end is defined else "n/a" }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <div class="toggle-group" role="group" aria-label="Monitoring comparison mode">
+            <button class="toggle-chip is-active" type="button" data-monitoring-compare="baseline" aria-pressed="true">vs Offline Baseline</button>
+            <button class="toggle-chip" type="button" data-monitoring-compare="previous" aria-pressed="false">vs Prior Window</button>
+          </div>
+        </div>
+      </div>
+
+      {% if monitoring_trends %}
+      <div class="trend-grid monitoring-trend-grid">
+        {% for card in monitoring_trends %}
+        {{ trend_card(card) }}
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if monitoring_history %}
+        {% for summary in monitoring_history %}
+        {% set window_index = loop.index0 %}
+        {% set window_feature_drifts = summary.feature_drifts if summary.feature_drifts is defined else [] %}
+        {% set window_concept = summary.concept_drift if summary.concept_drift is defined else {} %}
+        <section class="monitoring-window-panel{% if window_index == latest_monitoring_index %} is-active{% endif %}" data-monitoring-window="{{ window_index }}"{% if window_index != latest_monitoring_index %} hidden{% endif %}>
+          <div class="monitor-summary-grid">
+            <article class="stat-card"><span class="stat-label">Status</span><strong class="stat-value">{{ summary.status | replace("_", " ") }}</strong><span class="stat-note">Window {{ summary.window_start if summary.window_start is defined else "n/a" }} to {{ summary.window_end if summary.window_end is defined else "n/a" }}</span></article>
+            <article class="stat-card"><span class="stat-label">Inference Requests</span><strong class="stat-value">{{ summary.inference_count if summary.inference_count is defined else 0 }}</strong><span class="stat-note">Unique requests joined into this monitoring window.</span></article>
+            <article class="stat-card"><span class="stat-label">Outcome Rows</span><strong class="stat-value">{{ summary.outcome_count if summary.outcome_count is defined else 0 }}</strong><span class="stat-note">Delayed outcomes attributed to served recommendations.</span></article>
+            <article class="stat-card"><span class="stat-label">Concept Drop</span><strong class="stat-value">{{ "%.3f"|format(window_concept.performance_drop) if window_concept.performance_drop is defined else "n/a" }}</strong><span class="stat-note">Largest relative degradation versus the offline baseline.</span></article>
+          </div>
+
+          <div class="panel-head monitor-subhead"><div><p class="section-kicker">Analyst Interpretation</p><h2>{{ drift_story(window_feature_drifts[0] if window_feature_drifts else none) }}</h2></div></div>
+
+          <div class="comparison-grid">
+            {{ concept_metric_card("Hit Rate", hit_key, summary) }}
+            {{ concept_metric_card("NDCG", ndcg_key, summary) }}
+            {{ concept_metric_card("MRR", mrr_key, summary) }}
+            {{ concept_metric_card("Purchase Rate", purchase_key, summary) }}
+            {{ concept_metric_card("Cold-start Hit Rate", cold_start_key, summary) }}
+          </div>
+
+          {% if summary.top_drifting_features %}
+          <div class="jump-strip" data-monitoring-jump-set="{{ window_index }}"{% if window_index != latest_monitoring_index %} hidden{% endif %}>
+            <span class="toolbar-label">Jump to top drifting features</span>
+            <div class="quick-picks">
+              {% for feature_name in summary.top_drifting_features[:5] %}
+              {% set feature_anchor = "monitor-feature-" ~ window_index ~ "-" ~ (feature_name | replace("_", "-") | replace(" ", "-") | lower) %}
+              <a class="quick-user" href="#{{ feature_anchor }}">{{ feature_name | replace("_", " ") }}</a>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+
+          {% if window_feature_drifts %}
+          <div class="distribution-grid">
+            {% for feature in window_feature_drifts %}
+            {% set feature_anchor = "monitor-feature-" ~ window_index ~ "-" ~ (feature.feature_name | replace("_", "-") | replace(" ", "-") | lower) %}
+            {% set feature_status_class = "is-ready" if feature.status == "ok" else "is-warn" if feature.status == "warn" else "is-alert" %}
+            <article class="distribution-card" id="{{ feature_anchor }}">
+              <div class="distribution-card-head">
+                <div><strong>{{ feature.feature_name | replace("_", " ") }}</strong><span class="subtle">{{ feature.metric_type | upper }} {{ "%.3f"|format(feature.metric_value) }}</span></div>
+                <span class="status-pill {{ feature_status_class }}">{{ feature.status }}</span>
+              </div>
+              {% if feature.metric_type == "psi" and feature.reference_value.proportions is defined and feature.current_value.proportions is defined %}
+              <div class="histogram-card">
+                {{ histogram_row("Reference", feature.reference_value.proportions, "is-reference") }}
+                {{ histogram_row("Current", feature.current_value.proportions, "is-current") }}
+              </div>
+              {% if feature.reference_value.bin_labels is defined %}<div class="histogram-labels">{% for label in feature.reference_value.bin_labels %}<span>{{ label }}</span>{% endfor %}</div>{% endif %}
+              <div class="distribution-summary"><span>Ref mean {{ "%.2f"|format(feature.reference_value.mean) if feature.reference_value.mean is not none else "n/a" }}</span><span>Current mean {{ "%.2f"|format(feature.current_value.mean) if feature.current_value.mean is not none else "n/a" }}</span></div>
+              {% elif feature.metric_type == "js" and feature.reference_value.comparison_categories is defined and feature.current_value.comparison_categories is defined %}
+              <div class="mix-card">
+                {{ mix_row("Reference", feature.reference_value.comparison_categories, "is-reference") }}
+                {{ mix_row("Current", feature.current_value.comparison_categories, "is-current") }}
+              </div>
+              {% else %}
+              <div class="empty-state empty-state-compact"><strong>Distribution detail is unavailable for this feature.</strong><p>The monitoring summary does not include a renderable histogram or category-share payload for this row.</p></div>
+              {% endif %}
+            </article>
+            {% endfor %}
+          </div>
+
+          <div class="table-toolbar">
+            <label class="toolbar-field"><span class="toolbar-label">Search</span><input type="text" placeholder="Filter by feature name" data-table-search="feature-drifts-{{ window_index }}" /></label>
+            <label class="toolbar-field toolbar-field-compact"><span class="toolbar-label">Status</span><select data-table-select="feature-drifts-{{ window_index }}" data-filter-key="status"><option value="">All statuses</option></select></label>
+            <label class="toolbar-field toolbar-field-compact"><span class="toolbar-label">Metric</span><select data-table-select="feature-drifts-{{ window_index }}" data-filter-key="metric"><option value="">All metric types</option></select></label>
+            <div class="toolbar-summary"><span class="toolbar-count" data-table-count="feature-drifts-{{ window_index }}">{{ window_feature_drifts | length }} shown</span></div>
+          </div>
+
+          <div class="table-wrap table-wrap-sticky table-wrap-monitoring">
+            <table class="data-table data-table-monitoring" data-filter-table="feature-drifts-{{ window_index }}" data-sort-table="feature-drifts-{{ window_index }}">
+              <thead>
+                <tr>
+                  <th><button class="sort-button is-active" type="button" data-sort-trigger="feature-drifts-{{ window_index }}" data-sort-key="feature" data-sort-type="text" data-sort-default="true" data-sort-default-direction="asc">Feature</button></th>
+                  <th><button class="sort-button" type="button" data-sort-trigger="feature-drifts-{{ window_index }}" data-sort-key="metric" data-sort-type="text">Metric</button></th>
+                  <th><button class="sort-button" type="button" data-sort-trigger="feature-drifts-{{ window_index }}" data-sort-key="value" data-sort-type="number">Value</button></th>
+                  <th><button class="sort-button" type="button" data-sort-trigger="feature-drifts-{{ window_index }}" data-sort-key="status" data-sort-type="text">Status</button></th>
+                  <th><button class="sort-button" type="button" data-sort-trigger="feature-drifts-{{ window_index }}" data-sort-key="sample" data-sort-type="number">Sample</button></th>
+                  <th>Reference snapshot</th>
+                  <th>Current snapshot</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for feature in window_feature_drifts %}
+                {% set feature_status_class = "is-ready" if feature.status == "ok" else "is-warn" if feature.status == "warn" else "is-alert" %}
+                <tr data-table-row="feature-drifts-{{ window_index }}" data-search="{{ feature.feature_name | lower }}" data-status="{{ feature.status | lower }}" data-metric="{{ feature.metric_type | lower }}" data-feature="{{ feature.feature_name | lower }}" data-value="{{ feature.metric_value }}" data-sample="{{ feature.sample_size }}">
+                  <td><span class="item-title">{{ feature.feature_name | replace("_", " ") }}</span></td>
+                  <td>{{ feature.metric_type | upper }}</td>
+                  <td class="numeric-column">{{ "%.3f"|format(feature.metric_value) }}</td>
+                  <td><span class="status-pill {{ feature_status_class }}">{{ feature.status }}</span></td>
+                  <td class="numeric-column">{{ feature.sample_size }}</td>
+                  <td>{% if feature.reference_value.top_categories is defined %}{% for label, value in feature.reference_value.top_categories %}<div class="snapshot-line">{{ label | replace("_", " ") }} <span>{{ "%.2f"|format(value) }}</span></div>{% endfor %}{% else %}<div class="snapshot-line">Mean <span>{{ "%.2f"|format(feature.reference_value.mean) if feature.reference_value.mean is not none else "n/a" }}</span></div><div class="snapshot-line">Sample <span>{{ feature.reference_value.sample_size if feature.reference_value.sample_size is defined else "n/a" }}</span></div>{% endif %}</td>
+                  <td>{% if feature.current_value.top_categories is defined %}{% for label, value in feature.current_value.top_categories %}<div class="snapshot-line">{{ label | replace("_", " ") }} <span>{{ "%.2f"|format(value) }}</span></div>{% endfor %}{% else %}<div class="snapshot-line">Mean <span>{{ "%.2f"|format(feature.current_value.mean) if feature.current_value.mean is not none else "n/a" }}</span></div><div class="snapshot-line">Sample <span>{{ feature.current_value.sample_size if feature.current_value.sample_size is defined else "n/a" }}</span></div>{% endif %}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="table-empty-message" data-table-empty="feature-drifts-{{ window_index }}" hidden>No monitoring drift rows match the current filters.</div>
+          {% else %}
+          <div class="empty-state empty-state-compact"><strong>No feature-level drift rows are available for this monitoring window.</strong><p>Complete a monitoring run against served requests to populate this control room.</p></div>
+          {% endif %}
+        </section>
+        {% endfor %}
+      {% else %}
+      <div class="empty-state"><strong>No monitoring history is available yet.</strong><p>Run `monitor-backfill --simulate-outcomes` or a real monitoring window to populate the operational control room.</p></div>
+      {% endif %}
+    </article>
+  </div>
+</section>
+{% endblock %}

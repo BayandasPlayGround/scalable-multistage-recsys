@@ -86,6 +86,17 @@ class AvailableUser:
     last_ordered_at: str | None = None
 
 
+@dataclass(slots=True)
+class UserProfile:
+    user_id: str
+    interaction_count: int
+    history_length: int
+    last_ordered_at: str | None = None
+    average_review_rating: float | None = None
+    verified_purchase_rate: float | None = None
+    top_categories: list[str] = field(default_factory=list)
+
+
 @dataclass
 class RuntimeBundle:
     manifest: BundleManifest

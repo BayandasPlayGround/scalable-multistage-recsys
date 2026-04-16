@@ -27,7 +27,7 @@
     return document.querySelector(workspaceSelector);
   }
 
-  function getActiveTabName(groupName = "insights") {
+  function getActiveTabName(groupName = "workspace") {
     const activeButton = document.querySelector(`${tabButtonSelector}[data-tab-group-name="${groupName}"].is-active`);
     return activeButton?.dataset.tabTarget || "";
   }
@@ -149,6 +149,8 @@
       document.title = parsed.title || document.title;
       currentWorkspace.replaceWith(nextWorkspace);
       initialiseTableFilters(document);
+      initialiseSortableTables(document);
+      initialiseMonitoringViews(document);
       initialiseTabs(document);
 
       if (pushState) {
@@ -271,6 +273,136 @@
     });
   }
 
+  function initialiseSortableTables(root = document) {
+    const tables = root.querySelectorAll("[data-sort-table]");
+    tables.forEach((table) => {
+      if (table.dataset.sortReady === "true") {
+        return;
+      }
+
+      const tableName = table.dataset.sortTable;
+      const tbody = table.querySelector("tbody");
+      const triggers = Array.from(root.querySelectorAll(`[data-sort-trigger="${tableName}"]`));
+      if (!tbody || !triggers.length) {
+        table.dataset.sortReady = "true";
+        return;
+      }
+
+      const rows = Array.from(tbody.querySelectorAll(`[data-table-row="${tableName}"]`));
+      rows.forEach((row, index) => {
+        row.dataset.sortIndex = String(index);
+      });
+
+      const applySort = (sortKey, sortType, nextDirection) => {
+        const orderedRows = [...rows].sort((left, right) => {
+          const leftRaw = left.dataset[sortKey] || "";
+          const rightRaw = right.dataset[sortKey] || "";
+
+          if (sortType === "number") {
+            const leftValue = Number.parseFloat(leftRaw || "0");
+            const rightValue = Number.parseFloat(rightRaw || "0");
+            if (leftValue === rightValue) {
+              return Number.parseInt(left.dataset.sortIndex || "0", 10) - Number.parseInt(right.dataset.sortIndex || "0", 10);
+            }
+            return nextDirection === "asc" ? leftValue - rightValue : rightValue - leftValue;
+          }
+
+          const comparison = leftRaw.localeCompare(rightRaw, undefined, { numeric: true, sensitivity: "base" });
+          if (comparison === 0) {
+            return Number.parseInt(left.dataset.sortIndex || "0", 10) - Number.parseInt(right.dataset.sortIndex || "0", 10);
+          }
+          return nextDirection === "asc" ? comparison : -comparison;
+        });
+
+        orderedRows.forEach((row) => tbody.appendChild(row));
+        table.dataset.sortKey = sortKey;
+        table.dataset.sortDirection = nextDirection;
+
+        triggers.forEach((trigger) => {
+          const isActive = trigger.dataset.sortKey === sortKey;
+          const direction = isActive ? nextDirection : "none";
+          trigger.dataset.sortDirection = direction;
+          trigger.classList.toggle("is-active", isActive);
+          trigger.setAttribute("aria-sort", direction === "none" ? "none" : direction === "asc" ? "ascending" : "descending");
+        });
+      };
+
+      triggers.forEach((trigger) => {
+        trigger.addEventListener("click", () => {
+          const sortKey = trigger.dataset.sortKey || "";
+          const sortType = trigger.dataset.sortType || "text";
+          const isActive = table.dataset.sortKey === sortKey;
+          const nextDirection = isActive && table.dataset.sortDirection === "desc" ? "asc" : "desc";
+          applySort(sortKey, sortType, nextDirection);
+        });
+      });
+
+      const defaultTrigger = triggers.find((trigger) => trigger.dataset.sortDefault === "true");
+      if (defaultTrigger) {
+        applySort(
+          defaultTrigger.dataset.sortKey || "",
+          defaultTrigger.dataset.sortType || "text",
+          defaultTrigger.dataset.sortDefaultDirection || "desc"
+        );
+      }
+
+      table.dataset.sortReady = "true";
+    });
+  }
+
+  function initialiseMonitoringViews(root = document) {
+    const shells = root.querySelectorAll("[data-monitoring-shell]");
+    shells.forEach((shell) => {
+      if (shell.dataset.monitoringReady === "true") {
+        return;
+      }
+
+      const panels = Array.from(shell.querySelectorAll("[data-monitoring-window]"));
+      const selector = shell.querySelector("[data-monitoring-window-select]");
+      const toggleButtons = Array.from(shell.querySelectorAll("[data-monitoring-compare]"));
+      const quickJumpSets = Array.from(shell.querySelectorAll("[data-monitoring-jump-set]"));
+      if (!panels.length) {
+        shell.dataset.monitoringReady = "true";
+        return;
+      }
+
+      const activateWindow = (windowId) => {
+        panels.forEach((panel) => {
+          const isActive = panel.dataset.monitoringWindow === windowId;
+          panel.hidden = !isActive;
+          panel.classList.toggle("is-active", isActive);
+        });
+        quickJumpSets.forEach((setNode) => {
+          const isActive = setNode.dataset.monitoringJumpSet === windowId;
+          setNode.hidden = !isActive;
+        });
+        if (selector && selector.value !== windowId) {
+          selector.value = windowId;
+        }
+      };
+
+      selector?.addEventListener("change", () => {
+        activateWindow(selector.value);
+      });
+
+      toggleButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          const nextMode = button.dataset.monitoringCompare || "baseline";
+          shell.dataset.compareMode = nextMode;
+          toggleButtons.forEach((candidate) => {
+            const isActive = candidate === button;
+            candidate.classList.toggle("is-active", isActive);
+            candidate.setAttribute("aria-pressed", String(isActive));
+          });
+        });
+      });
+
+      const defaultWindow = selector?.value || shell.dataset.defaultWindow || panels[panels.length - 1].dataset.monitoringWindow;
+      activateWindow(defaultWindow || panels[0].dataset.monitoringWindow || "");
+      shell.dataset.monitoringReady = "true";
+    });
+  }
+
   async function requestLocalShutdown(button) {
     const confirmed = window.confirm("Shutdown the local FastAPI server now?");
     if (!confirmed) {
@@ -383,7 +515,7 @@
   });
 
   window.addEventListener("popstate", () => {
-    void refreshWorkspace(`${window.location.pathname}${window.location.search}`, { pushState: false });
+    void refreshWorkspace(`${window.location.pathname}${window.location.search}${window.location.hash}`, { pushState: false });
   });
 
   window.addEventListener("hashchange", () => {
@@ -400,5 +532,7 @@
   });
 
   initialiseTableFilters(document);
+  initialiseSortableTables(document);
+  initialiseMonitoringViews(document);
   initialiseTabs(document);
 })();

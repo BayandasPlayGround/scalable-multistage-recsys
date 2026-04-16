@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import threading
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -22,7 +24,7 @@ LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 def _split_history_items(raw_value: str | None) -> list[str] | None:
     if not raw_value:
         return None
-    items = [item.strip() for item in raw_value.split(",") if item.strip()]
+    items = [item.strip() for item in re.split(r"[\s,+]+", raw_value) if item.strip()]
     return items or None
 
 
@@ -166,13 +168,18 @@ def _build_monitoring_trends(summaries: list[dict]) -> list[dict]:
 def index(
     request: Request,
     user_id: str | None = None,
+    selected_user_id: str | None = None,
     history_items: str | None = None,
     top_k: int = 7,
     service: BundleRecommendationService = Depends(get_recommendation_service),
 ) -> HTMLResponse:
     parsed_history = _split_history_items(history_items)
+    effective_selected_user_id = selected_user_id or user_id
     recommendations = []
     history = []
+    selected_user_profile = {}
+    selected_user_history = []
+    selected_user_recommendations = []
     error = None
     active_model = service.readiness()
     evaluation_summary = {}
@@ -192,6 +199,19 @@ def index(
     except Exception as exc:
         error = str(exc)
 
+    if effective_selected_user_id:
+        try:
+            user_payload = service.get_user_profile(
+                effective_selected_user_id,
+                history_limit=20,
+                recommendation_limit=min(top_k, 6),
+            )
+            selected_user_profile = asdict(user_payload["profile"])
+            selected_user_history = [asdict(item) for item in user_payload["history"]]
+            selected_user_recommendations = [asdict(item) for item in user_payload["recommendations"]]
+        except Exception as exc:
+            error = str(exc)
+
     if user_id or parsed_history:
         try:
             recommendations = service.recommend(user_id=user_id, history_items=parsed_history, top_k=top_k)
@@ -201,16 +221,21 @@ def index(
             error = str(exc)
     return TEMPLATES.TemplateResponse(
         request=request,
-        name="index.html",
+        name="dashboard.html",
         context={
             "active_model": active_model,
             "evaluation_summary": evaluation_summary,
             "monitoring_summary": monitoring_summary,
             "monitoring_history": monitoring_history,
+            "monitoring_previous_summary": monitoring_history[-2] if len(monitoring_history) > 1 else {},
             "monitoring_trends": monitoring_trends,
             "recommendations": recommendations,
             "history": history,
             "available_users": available_users,
+            "selected_user_id": effective_selected_user_id or "",
+            "selected_user_profile": selected_user_profile,
+            "selected_user_history": selected_user_history,
+            "selected_user_recommendations": selected_user_recommendations,
             "is_local_environment": service.settings.environment == "local",
             "can_shutdown_local_server": _can_shutdown_from_request(request, service.settings.environment),
             "environment_name": service.settings.environment,
