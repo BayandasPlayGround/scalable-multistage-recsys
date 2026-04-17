@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 
 from amazon_recsys.config.settings import AppSettings
-from amazon_recsys.domain.entities import InferenceLogRecord, MonitoringSummary, OutcomeLogRecord, ReferenceProfile
+from amazon_recsys.domain.entities import InferenceLogRecord, MonitoringSummary, OutcomeIngestResult, OutcomeLogRecord, ReferenceProfile
 from amazon_recsys.monitoring.utils import ensure_utc_iso, hash_user_identifier, sanitize_filename
 
 
@@ -27,12 +26,12 @@ class LocalMonitoringStore:
         self.summaries_dir.mkdir(parents=True, exist_ok=True)
         self.latest_dir.mkdir(parents=True, exist_ok=True)
 
-    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
+    def _write_json(self, path: Path, payload: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
 
-    def _read_json(self, path: Path) -> dict[str, Any]:
+    def _read_json(self, path: Path) -> dict[str, object]:
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
 
@@ -96,10 +95,10 @@ class LocalMonitoringStore:
             return pd.read_json(source, orient="records")
         raise ValueError(f"Unsupported outcome source format: {source.suffix}")
 
-    def ingest_outcomes(self, source: Path) -> dict[str, Any]:
+    def ingest_outcomes(self, source: Path) -> OutcomeIngestResult:
         frame = self._load_records_from_source(source)
         if frame.empty:
-            return {"source": str(source), "ingested": 0}
+            return OutcomeIngestResult(source=str(source), ingested=0)
         required = {"occurred_at", "item_id", "event_type"}
         missing = sorted(required.difference(frame.columns))
         if missing:
@@ -125,7 +124,7 @@ class LocalMonitoringStore:
                 )
             )
         ingested = self.append_outcome_records(records)
-        return {"source": str(source), "ingested": ingested}
+        return OutcomeIngestResult(source=str(source), ingested=ingested)
 
     def load_inference_frame(
         self,

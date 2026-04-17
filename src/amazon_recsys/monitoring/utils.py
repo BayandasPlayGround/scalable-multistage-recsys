@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Any
 
 import pandas as pd
 
@@ -16,7 +15,7 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def ensure_utc_iso(value: Any) -> str:
+def ensure_utc_iso(value: object) -> str:
     if value is None:
         raise ValueError("A timestamp value is required.")
     timestamp = pd.to_datetime(value, utc=True, errors="raise")
@@ -43,7 +42,7 @@ def split_candidate_sources(raw_value: str | None) -> list[str]:
     return [part.strip() for part in normalized.split("+") if part.strip()]
 
 
-def safe_float(value: Any) -> float | None:
+def safe_float(value: object) -> float | None:
     try:
         if pd.isna(value):
             return None
@@ -66,7 +65,7 @@ def sanitize_filename(value: str) -> str:
     )
 
 
-def json_dumps(value: Any) -> str:
+def json_dumps(value: object) -> str:
     return json.dumps(value, sort_keys=True)
 
 

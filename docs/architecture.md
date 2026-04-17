@@ -1,158 +1,52 @@
-﻿# Architecture Guide
+# Architecture Guide
 
-## From Research To Production
+## System Shape
 
-The earlier research environment was mostly:
+The repo is centered on the package under `src/amazon_recsys/`. That package owns the recommender, serving, monitoring, configuration, and CLI flows. Notebook files, template assets, and deployment folders still exist, but they are support layers around the package rather than the main implementation.
 
-- `notebooks/RecSys.ipynb`
-- `notebooks/amazon_recsys_pipeline.py`
-- research files in `Research/`
+Keep this mental model:
 
-The current production/development environment includes:
+- `src/amazon_recsys/` is the source of truth
+- notebooks consume the package through a compatibility import surface
+- `template.py` and `infra/azure/` are secondary bootstrap and deployment assets
 
-- a modular package under `src/amazon_recsys/`
-- a FastAPI + Jinja scaffold for serving and demoing recommendations
-- tests
-- Docker and compose files
-- Azure-first infrastructure placeholders
-- `template.py` for regenerating the scaffold structure
+## Recommender
 
-The short mental model is:
+The current recommender is a multi-stage system built in `src/amazon_recsys/ml/core.py`.
 
-- use `src/amazon_recsys/` as the source of truth
-- use the notebook as a client of that code
+Core data framing:
 
-## Two Working Modes
+- `parent_asin` is the canonical item ID
+- positives come from `rating >= 4`
+- neutral interactions come from `rating == 3`
+- hard negatives come from `rating <= 2`
+- evaluation uses leave-last-out temporal splits
 
-### Notebook / Research Mode
-
-Primary files:
-
-- `notebooks/RecSys.ipynb`
-- `notebooks/amazon_recsys_pipeline.py`
-- `Research/`
-
-Use this mode for:
-
-- EDA
-- corpus debugging
-- recommender experimentation
-- retrieval and ranking evaluation
-- qualitative recommendation review
-
-### Production Scaffold Mode
-
-Primary files and folders:
-
-- `src/amazon_recsys/`
-- `app.py`
-- `template.py`
-- `tests/`
-- `infra/azure/`
-- `Dockerfile`
-- `docker-compose.yml`
-- `.env.example`
-
-Use this mode for:
-
-- the authoritative ML implementation
-- service interfaces
-- API development
-- bundle export and serving
-- frontend prototyping
-- containerization
-- Azure deployment preparation
-
-## Current ML Architecture
-
-The recommender is still a two-stage system.
-
-### Retrieval / Candidate Generation
-
-Current direction:
+Retrieval stack:
 
 - popularity backfill
-- item-item cooccurrence / KNN
+- item-item cooccurrence
 - latent collaborative filtering via sparse SVD
-- content-based retrieval with TF-IDF + SVD text vectors
+- content-based retrieval with TF-IDF plus SVD text features
 - optional neural two-tower retrieval
-- hybrid candidate union
+- hybrid candidate union across sources
 
-### Ranking
+Ranking:
 
-Default production path:
+- default backend: `xgboost`
+- experimental backend: `dlrm`
 
-- `xgboost`
+Training outputs are written into run-scoped artifacts and can be packaged into versioned serving bundles.
 
-Experimental path:
+## Serving
 
-- `dlrm`
+Serving is bundle-backed.
 
-### Data Framing
+- `python -m amazon_recsys.cli.main export-bundle ... --activate` trains, exports, and activates a bundle
+- `python -m amazon_recsys.cli.main serve` starts the FastAPI app and Jinja UI
+- `src/amazon_recsys/application/services.py` loads the active bundle and refreshes when activation changes
 
-The pipeline currently uses:
-
-- `parent_asin` as the canonical item ID
-- positives from `rating >= 4`
-- neutral interactions from `rating == 3`
-- hard negatives from `rating <= 2`
-- Amazon metadata enrichment
-- leave-last-out temporal evaluation
-
-## Software Architecture
-
-The codebase is shaped as a modular monolith under `src/amazon_recsys/`.
-
-- `config/`
-  - settings, environment loading, dependency wiring
-- `domain/`
-  - entities, protocols, shared types
-- `application/`
-  - orchestration services and use cases
-- `infrastructure/`
-  - artifact loading, adapters, storage integrations
-- `ml/`
-  - core training, evaluation, bundle building
-- `monitoring/`
-  - reference profiles, inference/outcome logs, drift computation
-- `api/`
-  - FastAPI app, routers, request/response models
-- `web/`
-  - Jinja templates, static assets, UI routes
-- `observability/`
-  - logging and MLflow hooks
-- `cli/`
-  - train, evaluate, export, serve, monitor commands
-
-## Repository Map
-
-```text
-.
-|-- README.md
-|-- docs/
-|-- src/amazon_recsys/
-|-- tests/
-|-- notebooks/
-|-- infra/azure/
-|-- artifacts/
-|-- amazon_review_data/
-|-- app.py
-|-- template.py
-|-- Dockerfile
-|-- docker-compose.yml
-`-- .env.example
-```
-
-How to read that:
-
-- `src/amazon_recsys/` is the production codebase and source of truth
-- `notebooks/amazon_recsys_pipeline.py` is the notebook compatibility import layer
-- `artifacts/` stores caches, trained artifacts, bundles, and monitoring outputs
-- `amazon_review_data/` stores the local source data and metadata
-
-## FastAPI + Jinja App Layer
-
-The serving scaffold includes API routes such as:
+Main runtime surfaces:
 
 - `/health`
 - `/ready`
@@ -160,98 +54,48 @@ The serving scaffold includes API routes such as:
 - `/users`
 - `/recommend`
 - `/users/{user_id}/history`
+- `/users/{user_id}/profile`
 - `/models/active`
 - `/evaluate/summary`
 - `/monitoring/drift/summary`
+- `/monitoring/drift/history`
 
-The Jinja UI is intended to support:
+If no active bundle exists, the service can return a mock bundle only when `use_mock_bundle_if_missing` is enabled. The real serving path is always the active exported bundle.
 
-- trained user lookup
-- prior-order inspection
-- recommendation review
-- candidate provenance
-- active model visibility
-- latest monitoring summary visibility
+## Monitoring
 
-## Azure-First Structure
+Monitoring is batch and bundle-scoped.
 
-Azure-oriented scaffolding lives under:
+- export builds a reference profile for the bundle
+- serving records inference events after successful recommendations
+- delayed outcomes are ingested or simulated
+- monitoring compares the active bundle reference profile against served traffic and outcomes
 
-- `infra/azure/bicep/`
-- `infra/azure/aml/`
-- `infra/azure/aks/`
+Operational entry points:
 
-Intended responsibilities:
+- `ingest-outcomes`
+- `simulate-outcomes`
+- `monitor-drift`
+- `monitor-backfill`
 
-- `bicep/`
-  - infrastructure-as-code
-- `aml/`
-  - Azure ML environments and jobs
-- `aks/`
-  - serving deployment manifests
+The monitoring package persists latest summaries plus history, computes feature drift and concept drift, and logs monitoring runs to MLflow when enabled.
 
-The deployment target is Azure-first, but the core recommender logic stays package-local and cloud-agnostic.
+## Compatibility
 
-## Configuration Story
+Notebook compatibility is still deliberate.
 
-There are two main configuration layers.
+- `notebooks/amazon_recsys_pipeline.py` is the notebook import layer over the package ML core
+- `notebooks/RecSys.ipynb` remains the notebook front end
+- `src/amazon_recsys/config/settings.py` preserves legacy workspace and artifact path resolution for notebook-era layouts
 
-### Core ML Configuration
+This keeps older notebook workflows usable without moving the source of truth back out of the package.
 
-The recommender workflow is controlled mainly by `PipelineConfig` inside `src/amazon_recsys/ml/core.py`.
+## Secondary Support Assets
 
-That covers:
+These pieces still matter, but they are not the primary system:
 
-- ingestion and sampling
-- filtering
-- training caps
-- retriever and ranker choices
-- evaluation controls
-- artifact locations
+- `template.py` copies the repo template structure into a target root
+- `infra/azure/` holds deployment-oriented Azure assets
+- Docker, Compose, and workflow files support packaging and deployment work
 
-### Application / Runtime Configuration
-
-The application runtime is controlled by typed settings under `src/amazon_recsys/config/`.
-
-Main typed groups:
-
-- `DataConfig`
-- `TrainingConfig`
-- `RetrievalConfig`
-- `RankingConfig`
-- `ServingConfig`
-- `MLflowConfig`
-- `MonitoringConfig`
-- `AzureConfig`
-
-Environment-driven values are documented in `.env.example`.
-
-## Migration Status
-
-Already real:
-
-- package-owned ML core in `src/amazon_recsys/ml/core.py`
-- notebook compatibility import layer
-- hybrid retrieval experimentation
-- XGBoost-first ranking direction
-- artifact generation, evaluation outputs, bundle activation, and monitoring summaries
-- FastAPI + Jinja scaffold
-- Docker and compose files
-- Azure folder structure
-
-Still evolving:
-
-- deeper decomposition of `ml/core.py`
-- broader bundle export support beyond the current classical + XGBoost path
-- real Azure ML job execution and live infra validation
-
-## Recommended Mental Model
-
-If the upgrade feels large, keep this short map in mind:
-
-- `src/amazon_recsys/ml/core.py` is the recommender engine
-- `notebooks/amazon_recsys_pipeline.py` is the notebook compatibility layer
-- `src/amazon_recsys/application/services.py` serves active bundles
-- `src/amazon_recsys/monitoring/` owns batch drift monitoring
-- `template.py` recreates the scaffold
-- `tests/` protect local and production-like behavior
+Treat them as bootstrap and deployment support around the current recommender platform, not as the core implementation.

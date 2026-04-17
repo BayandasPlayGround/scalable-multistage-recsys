@@ -68,4 +68,5 @@ def test_build_container_wires_services(mock_settings: AppSettings) -> None:
     assert container.settings.app_name
     assert container.artifact_store is not None
     assert container.training_pipeline is not None
-    assert container.recommendation_service.readiness()["ready"] is True
+    assert container.bundle_export_service is not None
+    assert container.recommendation_service.readiness().ready is True

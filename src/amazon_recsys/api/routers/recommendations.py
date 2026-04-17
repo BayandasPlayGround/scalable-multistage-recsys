@@ -2,7 +2,6 @@ from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from amazon_recsys.api.dependencies import get_recommendation_service
 from amazon_recsys.api.schemas import (
     AvailableUserResponse,
     AvailableUsersResponse,
@@ -15,6 +14,7 @@ from amazon_recsys.api.schemas import (
     UserProfileSummaryResponse,
 )
 from amazon_recsys.application.services import BundleRecommendationService
+from amazon_recsys.presentation.dependencies import get_recommendation_service
 
 
 router = APIRouter(tags=["recommendations"])
@@ -57,8 +57,8 @@ def recommend(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return RecommendationResponse(
         top_k=request.top_k or len(items),
-        source=model["source"],
-        active_bundle_version=model["version"],
+        source=model.source,
+        active_bundle_version=model.version,
         items=[RecommendationItemResponse(**asdict(item)) for item in items],
     )
 
@@ -98,7 +98,7 @@ def user_profile(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return UserProfileResponse(
-        profile=UserProfileSummaryResponse(**asdict(payload["profile"])),
-        history=[HistoryItemResponse(**asdict(item)) for item in payload["history"]],
-        recommendations=[RecommendationItemResponse(**asdict(item)) for item in payload["recommendations"]],
+        profile=UserProfileSummaryResponse(**asdict(payload.profile)),
+        history=[HistoryItemResponse(**asdict(item)) for item in payload.history],
+        recommendations=[RecommendationItemResponse(**asdict(item)) for item in payload.recommendations],
     )

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
 from amazon_recsys.api.app import create_app
+from amazon_recsys.ml import core
 
 
 @pytest.mark.slow
@@ -11,10 +14,8 @@ from amazon_recsys.api.app import create_app
 @pytest.mark.retrieval
 @pytest.mark.ranking
 @pytest.mark.serving
-def test_training_bundle_round_trip(test_container) -> None:
-    session = test_container.training_pipeline.run(force_rebuild=True)
-    manifest = test_container.artifact_store.save_bundle(session, version="fixture-bundle")
-    pointer = test_container.artifact_store.activate_bundle(manifest.version)
+def test_training_bundle_round_trip(test_container, train_export_activate) -> None:
+    bundle = train_export_activate(test_container, version="fixture-bundle")
     test_container.recommendation_service.refresh()
 
     recommendations = test_container.recommendation_service.recommend(user_id="u1", top_k=3)
@@ -23,15 +24,16 @@ def test_training_bundle_round_trip(test_container) -> None:
     model = test_container.recommendation_service.get_active_model()
     summary = test_container.recommendation_service.get_evaluation_summary()
 
-    assert pointer.version == "fixture-bundle"
-    assert session.pipeline_config.__class__.__module__ == "amazon_recsys.ml.core"
-    assert session.prepared.__class__.__module__ == "amazon_recsys.ml.core"
+    assert bundle.pointer is not None
+    assert bundle.pointer.version == "fixture-bundle"
+    assert bundle.session.pipeline_config.__class__.__module__ == "amazon_recsys.ml.core"
+    assert bundle.session.prepared.__class__.__module__ == "amazon_recsys.ml.core"
     assert 1 <= len(recommendations) <= 3
     assert history
     assert available_users
     assert available_users[0].interaction_count >= 1
-    assert model["version"] == "fixture-bundle"
-    assert summary["metric_files"]
+    assert model.version == "fixture-bundle"
+    assert summary.metric_files
 
     client = TestClient(create_app(test_container.settings))
     api_response = client.post("/recommend", json={"user_id": "u1", "top_k": 2})
@@ -48,3 +50,20 @@ def test_training_bundle_round_trip(test_container) -> None:
     assert "available-users" in page_response.text
     assert 'data-filter-table="qa-results"' in page_response.text
     assert 'data-filter-table="analysis-users"' in page_response.text
+
+
+@pytest.mark.retrieval
+def test_neural_retriever_failures_raise_when_enabled(monkeypatch) -> None:
+    prepared = SimpleNamespace(config=SimpleNamespace(enable_neural_retriever=True))
+    split_artifacts = object()
+
+    monkeypatch.setattr(core, "train_content_retriever", lambda *_args, **_kwargs: "content")
+    monkeypatch.setattr(core, "train_latent_cf_retriever", lambda *_args, **_kwargs: "latent")
+
+    def _fail_neural(*_args, **_kwargs):
+        raise RuntimeError("two_tower retriever exploded")
+
+    monkeypatch.setattr(core, "train_retriever", _fail_neural)
+
+    with pytest.raises(RuntimeError, match="two_tower retriever exploded"):
+        core.train_retrievers(prepared, split_artifacts)

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import ReferenceProfile, utcnow_iso
 from amazon_recsys.ml import core
+from amazon_recsys.ml.pipelines import TrainingSession
 from amazon_recsys.monitoring.metrics import MONITORED_K, assign_popularity_bucket, categorical_profile, numeric_profile
 from amazon_recsys.monitoring.utils import safe_float, split_candidate_sources
 
@@ -61,7 +61,7 @@ def _popularity_thresholds(item_features: pd.DataFrame) -> list[float]:
     return [float(value) for value in quantiles]
 
 
-def _recommendation_sample_frame(session: Any, monitored_k: int, user_cap: int = 200) -> pd.DataFrame:
+def _recommendation_sample_frame(session: TrainingSession, monitored_k: int, user_cap: int = 200) -> pd.DataFrame:
     prepared = session.prepared
     split_artifacts = session.split_artifacts
     item_frame = prepared.item_features[["parent_asin", "source_category", "price", "average_rating"]].copy()
@@ -78,7 +78,7 @@ def _recommendation_sample_frame(session: Any, monitored_k: int, user_cap: int =
         .head(user_cap)
     )
 
-    rows: list[dict[str, Any]] = []
+    rows: list[dict[str, object]] = []
     for user_row in users.to_dict(orient="records"):
         frame = core.recommend(
             prepared,
@@ -99,7 +99,12 @@ def _recommendation_sample_frame(session: Any, monitored_k: int, user_cap: int =
     return pd.DataFrame(rows)
 
 
-def build_reference_profile(settings: AppSettings, session: Any, bundle_version: str, monitored_k: int = MONITORED_K) -> ReferenceProfile:
+def build_reference_profile(
+    settings: AppSettings,
+    session: TrainingSession,
+    bundle_version: str,
+    monitored_k: int = MONITORED_K,
+) -> ReferenceProfile:
     prepared = session.prepared
     split_artifacts = session.split_artifacts
     request_examples = (

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
 import pandas as pd
 
 from amazon_recsys.config.settings import AppSettings
-from amazon_recsys.domain.entities import InferenceLogRecord, MonitoringSummary, OutcomeLogRecord, ReferenceProfile, RuntimeBundle, utcnow_iso
-from amazon_recsys.infrastructure.artifacts import LocalArtifactStore
+from amazon_recsys.domain.entities import InferenceLogRecord, MonitoringSummary, OutcomeIngestResult, OutcomeLogRecord, OutcomeSimulationResult, RecommendationItem, ReferenceProfile, RuntimeBundle, utcnow_iso
+from amazon_recsys.domain.protocols import ArtifactStore, MonitoringStore
 from amazon_recsys.monitoring.metrics import (
     MONITORED_K,
     compute_concept_drift,
@@ -19,7 +18,6 @@ from amazon_recsys.monitoring.metrics import (
     summary_status,
 )
 from amazon_recsys.monitoring.reference import build_reference_profile
-from amazon_recsys.monitoring.store import LocalMonitoringStore
 from amazon_recsys.monitoring.utils import ensure_utc_iso, hash_user_identifier
 from amazon_recsys.observability.mlflow import MLflowTracker
 
@@ -29,13 +27,14 @@ class MonitoringService:
         self,
         *,
         settings: AppSettings,
-        artifact_store: LocalArtifactStore,
-        monitoring_store: LocalMonitoringStore,
+        artifact_store: ArtifactStore,
+        monitoring_store: MonitoringStore,
+        mlflow_tracker: MLflowTracker | None = None,
     ) -> None:
         self.settings = settings
         self.artifact_store = artifact_store
         self.monitoring_store = monitoring_store
-        self.mlflow_tracker = MLflowTracker(settings)
+        self.mlflow_tracker = mlflow_tracker or MLflowTracker(settings)
 
     def _resolve_bundle_version(self, bundle_version: str | None = None) -> str:
         if bundle_version and bundle_version != "active":
@@ -45,7 +44,7 @@ class MonitoringService:
             raise FileNotFoundError("No active bundle is configured.")
         return manifest.version
 
-    def build_reference_profile(self, session: Any, bundle_version: str) -> Path:
+    def build_reference_profile(self, session, bundle_version: str) -> Path:
         profile = build_reference_profile(self.settings, session, bundle_version=bundle_version, monitored_k=MONITORED_K)
         return self.monitoring_store.save_reference_profile(profile)
 
@@ -82,7 +81,7 @@ class MonitoringService:
         user_id: str | None,
         history_items: list[str] | None,
         top_k: int,
-        items: list[Any],
+        items: list[RecommendationItem],
     ) -> int:
         if not self.settings.monitoring.enabled or bundle.is_mock or not items:
             return 0
@@ -136,7 +135,7 @@ class MonitoringService:
             )
         return self.monitoring_store.append_inference_records(records)
 
-    def ingest_outcomes(self, source: Path) -> dict[str, Any]:
+    def ingest_outcomes(self, source: Path) -> OutcomeIngestResult:
         return self.monitoring_store.ingest_outcomes(Path(source))
 
     def simulate_outcomes(
@@ -147,7 +146,7 @@ class MonitoringService:
         window_end: str | None = None,
         days: int | None = 1,
         delay_minutes: int = 60,
-    ) -> dict[str, Any]:
+    ) -> OutcomeSimulationResult:
         resolved_bundle_version = self._resolve_bundle_version(bundle_version)
         normalized_window_start, normalized_window_end = self._resolve_monitoring_window(
             window_start=window_start,
@@ -191,18 +190,18 @@ class MonitoringService:
             )
 
         ingested = self.monitoring_store.append_outcome_records(records)
-        return {
-            "source": "synthetic_inference_replay",
-            "bundle_version": resolved_bundle_version,
-            "window_start": normalized_window_start,
-            "window_end": normalized_window_end,
-            "requests_seen": int(inference_frame["request_id"].nunique()),
-            "requests_with_user_key": int(top_rank["request_id"].nunique()),
-            "created": int(len(records)),
-            "ingested": ingested,
-            "event_type": "purchase",
-            "rating": 5.0,
-        }
+        return OutcomeSimulationResult(
+            source="synthetic_inference_replay",
+            bundle_version=resolved_bundle_version,
+            window_start=normalized_window_start,
+            window_end=normalized_window_end,
+            requests_seen=int(inference_frame["request_id"].nunique()),
+            requests_with_user_key=int(top_rank["request_id"].nunique()),
+            created=int(len(records)),
+            ingested=ingested,
+            event_type="purchase",
+            rating=5.0,
+        )
 
     def _previous_summary(self, bundle_version: str, window_end: str) -> MonitoringSummary | None:
         current_end = pd.to_datetime(window_end, utc=True)

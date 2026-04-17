@@ -3,33 +3,30 @@ from __future__ import annotations
 import json
 import pickle
 from pathlib import Path
-from typing import Any
 
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import ActiveBundlePointer, BundleManifest, RuntimeBundle, utcnow_iso
 from amazon_recsys.ml.bundles import build_bundle_manifest, build_runtime_bundle, generate_bundle_version
-from amazon_recsys.ml import core  # noqa: F401
 from amazon_recsys.ml.legacy import load_legacy_pipeline
-from amazon_recsys.monitoring.reference import build_reference_profile
-from amazon_recsys.monitoring.store import LocalMonitoringStore
-from amazon_recsys.observability.mlflow import MLflowTracker
+from amazon_recsys.ml.pipelines import TrainingSession
 
 
 class LocalArtifactStore:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self.settings.ensure_runtime_directories()
-        self.mlflow_tracker = MLflowTracker(settings)
-        self.monitoring_store = LocalMonitoringStore(settings)
 
-    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
+    def _write_json(self, path: Path, payload: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
 
-    def _read_json(self, path: Path) -> dict[str, Any]:
+    def _read_json(self, path: Path) -> dict[str, object]:
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
+
+    def write_manifest(self, manifest: BundleManifest) -> None:
+        self._write_json(manifest.manifest_file, manifest.to_dict())
 
     def list_bundles(self) -> list[BundleManifest]:
         manifests: list[BundleManifest] = []
@@ -43,7 +40,7 @@ class LocalArtifactStore:
             raise FileNotFoundError(f"Bundle manifest not found for version {version!r}.")
         return BundleManifest.from_dict(self._read_json(manifest_path))
 
-    def save_bundle(self, session: Any, version: str | None = None) -> BundleManifest:
+    def save_bundle(self, session: TrainingSession, version: str | None = None) -> BundleManifest:
         bundle_version = version or generate_bundle_version(self.settings.training.run_name)
         bundle_dir = self.settings.resolved_bundle_root / bundle_version
         bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -51,15 +48,9 @@ class LocalArtifactStore:
         runtime_bundle = build_runtime_bundle(session, manifest)
         with open(manifest.runtime_bundle_file, "wb") as handle:
             pickle.dump(runtime_bundle, handle)
-        self._write_json(Path(manifest.manifest_path), manifest.to_dict())
+        self.write_manifest(manifest)
         if manifest.evaluation_summary_path is not None:
-            self._write_json(Path(manifest.evaluation_summary_path), runtime_bundle.evaluation_summary)
-        reference_profile = build_reference_profile(self.settings, session, bundle_version=manifest.version)
-        reference_profile_path = self.monitoring_store.save_reference_profile(reference_profile)
-        manifest.notes["reference_profile_path"] = str(reference_profile_path)
-        manifest.notes["reference_bundle_version"] = manifest.version
-        self._write_json(Path(manifest.manifest_path), manifest.to_dict())
-        self.mlflow_tracker.log_bundle_export(session, manifest, extra_artifacts=[reference_profile_path])
+            self._write_json(Path(manifest.evaluation_summary_path), runtime_bundle.evaluation_summary.to_dict())
         return manifest
 
     def activate_bundle(self, version: str) -> ActiveBundlePointer:
@@ -80,12 +71,15 @@ class LocalArtifactStore:
         if "manifest_path" in payload and "activated_at" in payload:
             return ActiveBundlePointer.from_dict(payload)
         if "runtime_bundle_path" in payload:
-            return ActiveBundlePointer(
-                version=str(payload.get("version", "unknown")),
-                manifest_path=str(path),
-                activated_at=str(payload.get("created_at", utcnow_iso())),
-            )
+            return self._legacy_active_pointer(path, payload)
         raise ValueError(f"Unsupported active bundle payload at {path}")
+
+    def _legacy_active_pointer(self, path: Path, payload: dict[str, object]) -> ActiveBundlePointer:
+        return ActiveBundlePointer(
+            version=str(payload.get("version", "unknown")),
+            manifest_path=str(path),
+            activated_at=str(payload.get("created_at", utcnow_iso())),
+        )
 
     def read_active_manifest(self) -> BundleManifest | None:
         pointer = self.read_active_pointer()

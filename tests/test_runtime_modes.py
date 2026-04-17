@@ -25,7 +25,7 @@ def test_local_dev_mode_uses_mock_bundle(mock_settings) -> None:
 @pytest.mark.serving
 @pytest.mark.config
 @pytest.mark.ranking
-def test_production_mode_requires_real_bundle(production_settings) -> None:
+def test_production_mode_requires_real_bundle(production_settings, train_export_activate) -> None:
     pre_client = TestClient(create_app(production_settings))
     pre_ready = pre_client.get("/ready")
     pre_shutdown = pre_client.post("/local/shutdown")
@@ -35,9 +35,7 @@ def test_production_mode_requires_real_bundle(production_settings) -> None:
     assert pre_shutdown.status_code == 403
 
     container = build_container(production_settings)
-    session = container.training_pipeline.run(force_rebuild=True)
-    manifest = container.artifact_store.save_bundle(session, version="prod-bundle")
-    container.artifact_store.activate_bundle(manifest.version)
+    bundle = train_export_activate(container, version="prod-bundle")
 
     post_client = TestClient(create_app(production_settings))
     post_ready = post_client.get("/ready")
@@ -45,7 +43,7 @@ def test_production_mode_requires_real_bundle(production_settings) -> None:
     post_recommend = post_client.post("/recommend", json={"user_id": "u1", "top_k": 2})
 
     assert post_ready.status_code == 200
-    assert post_ready.json()["version"] == "prod-bundle"
+    assert post_ready.json()["version"] == bundle.manifest.version
     assert post_model.status_code == 200
     assert post_model.json()["source"] == "bundle"
     assert post_recommend.status_code == 200

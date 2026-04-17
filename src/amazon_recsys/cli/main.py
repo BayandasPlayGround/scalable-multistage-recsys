@@ -7,7 +7,8 @@ from pathlib import Path
 import uvicorn
 
 from amazon_recsys.api.app import create_app
-from amazon_recsys.config.container import build_container
+from amazon_recsys.bootstrap import build_container
+from amazon_recsys.domain.entities import EvaluationSummary
 from amazon_recsys.config.settings import AppSettings, get_settings
 
 
@@ -66,6 +67,12 @@ def settings_from_args(args: argparse.Namespace) -> AppSettings:
     return base.model_copy(update=updates)
 
 
+def _json_payload(value: object) -> object:
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -74,24 +81,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "train":
         session = container.training_pipeline.run(force_rebuild=args.force_rebuild)
-        payload = dict(session.evaluation_summary)
-        if session.mlflow_run_id is not None:
-            payload["mlflow"] = {
-                "run_id": session.mlflow_run_id,
-                "experiment_name": session.mlflow_experiment_name,
-                "tracking_uri": session.mlflow_tracking_uri,
-            }
-        print(json.dumps(payload, indent=2, default=str))
+        summary = EvaluationSummary.from_dict(session.evaluation_summary.to_dict())
+        if session.mlflow is not None:
+            summary.mlflow = session.mlflow
+        print(json.dumps(summary.to_dict(), indent=2, default=str))
         return 0
 
     if args.command == "evaluate":
         summary = container.training_pipeline.evaluate(force_rebuild=args.force_rebuild)
-        print(json.dumps(summary, indent=2, default=str))
+        print(json.dumps(summary.to_dict(), indent=2, default=str))
         return 0
 
     if args.command == "export-bundle":
         session = container.training_pipeline.run(force_rebuild=args.force_rebuild)
-        manifest = container.artifact_store.save_bundle(session, version=args.version)
+        manifest = container.bundle_export_service.export_bundle(session, version=args.version)
         if args.activate:
             container.artifact_store.activate_bundle(manifest.version)
             container.recommendation_service.refresh()
@@ -106,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ingest-outcomes":
         payload = container.monitoring_service.ingest_outcomes(Path(args.source))
-        print(json.dumps(payload, indent=2, default=str))
+        print(json.dumps(_json_payload(payload), indent=2, default=str))
         return 0
 
     if args.command == "simulate-outcomes":
@@ -117,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             days=args.days,
             delay_minutes=args.delay_minutes,
         )
-        print(json.dumps(payload, indent=2, default=str))
+        print(json.dumps(_json_payload(payload), indent=2, default=str))
         return 0
 
     if args.command == "monitor-drift":

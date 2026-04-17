@@ -1,47 +1,10 @@
 from __future__ import annotations
 
 from functools import lru_cache
-import os
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
-
-try:
-    from pydantic_settings import BaseSettings, SettingsConfigDict
-except ModuleNotFoundError:
-    try:
-        from dotenv import dotenv_values
-    except ModuleNotFoundError:
-        dotenv_values = None
-
-    class SettingsConfigDict(dict):
-        pass
-
-    class BaseSettings(BaseModel):
-        model_config = SettingsConfigDict()
-
-        def __init__(self, **data: Any) -> None:
-            config = dict(getattr(self.__class__, "model_config", {}) or {})
-            env_prefix = str(config.get("env_prefix", ""))
-            merged: dict[str, Any] = {}
-
-            env_file = config.get("env_file")
-            if env_file and dotenv_values is not None:
-                env_path = Path(env_file)
-                if not env_path.is_absolute():
-                    env_path = default_workspace_root() / env_path
-                if env_path.exists():
-                    for key, value in dotenv_values(env_path).items():
-                        if key and key.startswith(env_prefix) and value is not None:
-                            merged[key[len(env_prefix):].lower()] = value
-
-            for key, value in os.environ.items():
-                if key.startswith(env_prefix):
-                    merged[key[len(env_prefix):].lower()] = value
-
-            merged.update(data)
-            super().__init__(**merged)
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_CATEGORIES = ("All_Beauty", "Automotive", "Industrial_and_Scientific")
@@ -217,7 +180,7 @@ class AppSettings(BaseSettings):
 
     @field_validator("workspace_root", mode="before")
     @classmethod
-    def _coerce_workspace_root(cls, value: Any) -> Path:
+    def _coerce_workspace_root(cls, value: object) -> Path:
         return Path(value).expanduser().resolve() if value is not None else default_workspace_root()
 
     @field_validator("run_profile")
@@ -420,7 +383,7 @@ class AppSettings(BaseSettings):
         self.resolved_mlflow_backend_root.mkdir(parents=True, exist_ok=True)
         self.resolved_monitoring_root.mkdir(parents=True, exist_ok=True)
 
-    def safe_config(self) -> dict[str, Any]:
+    def safe_config(self) -> dict[str, object]:
         return {
             "app_name": self.app_name,
             "app_version": self.app_version,

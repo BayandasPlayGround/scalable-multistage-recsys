@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "amazon-recsys"
 version = "0.1.0"
-description = "Azure-first production scaffold for the Amazon recommender system."
+description = "Package-owned Amazon recommender with bundle serving, monitoring, and notebook compatibility."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -45,13 +45,13 @@ where = ["src"]
 addopts = "-p no:cacheprovider -p no:tmpdir"
 testpaths = ["tests"]
 markers = [
-  "foundation: fast scaffolding and import tests",
+  "foundation: fast import, compatibility, and template tests",
   "config: settings and container tests",
   "data: corpus and split tests",
   "retrieval: candidate generation and retriever tests",
   "ranking: ranker and recommendation service tests",
   "serving: API, web, and bundle serving tests",
-  "infra: docker, workflow, and deployment scaffold tests",
+  "infra: docker, workflow, and deployment support tests",
   "slow: longer-running integration tests",
-  "azure: Azure-specific scaffold tests",
+  "azure: Azure-specific compatibility and deployment tests",
 ]

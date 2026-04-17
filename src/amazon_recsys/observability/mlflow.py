@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from amazon_recsys.config.settings import AppSettings
+from amazon_recsys.domain.entities import BundleManifest, EvaluationSummary, MlflowRunInfo
 
 try:
     import mlflow
-except Exception:
+except ModuleNotFoundError:
     mlflow = None
+
+if TYPE_CHECKING:
+    from amazon_recsys.domain.entities import MonitoringSummary
+    from amazon_recsys.ml.core import PipelineConfig
+    from amazon_recsys.ml.pipelines import TrainingSession
 
 
 LOGGER = logging.getLogger(__name__)
@@ -19,7 +25,7 @@ _UNAVAILABLE_WARNING_EMITTED = False
 _DIMENSION_COLUMNS = {"K", "split", "stage", "variant"}
 
 
-def _stringify(value: Any) -> str:
+def _stringify(value: object) -> str:
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, (list, tuple, set)):
@@ -27,7 +33,7 @@ def _stringify(value: Any) -> str:
     return str(value)
 
 
-def _flatten_mapping(value: dict[str, Any], prefix: str = "") -> dict[str, str]:
+def _flatten_mapping(value: dict[str, object], prefix: str = "") -> dict[str, str]:
     flattened: dict[str, str] = {}
     for key, item in value.items():
         flat_key = f"{prefix}.{key}" if prefix else key
@@ -38,7 +44,7 @@ def _flatten_mapping(value: dict[str, Any], prefix: str = "") -> dict[str, str]:
     return flattened
 
 
-def _numeric_value(value: Any) -> float | None:
+def _numeric_value(value: object) -> float | None:
     try:
         if pd.isna(value):
             return None
@@ -98,12 +104,12 @@ class MLflowTracker:
         base = f"{phase}-{self.settings.training.run_name}-{self.settings.training.run_profile}"
         return f"{prefix}-{base}" if prefix else base
 
-    def _log_params(self, params: dict[str, Any]) -> None:
+    def _log_params(self, params: dict[str, object]) -> None:
         assert mlflow is not None
         for key, value in _flatten_mapping(params).items():
             mlflow.log_param(key, value[:500])
 
-    def _log_metrics(self, metrics: dict[str, Any]) -> None:
+    def _log_metrics(self, metrics: dict[str, object]) -> None:
         assert mlflow is not None
         for key, value in metrics.items():
             numeric = _numeric_value(value)
@@ -145,7 +151,7 @@ class MLflowTracker:
                     else:
                         mlflow.log_metric(metric_name, numeric, step=step)
 
-    def _session_metrics(self, session: Any) -> dict[str, float]:
+    def _session_metrics(self, session: TrainingSession) -> dict[str, float]:
         prepared = session.prepared
         split_artifacts = session.split_artifacts
         interactions = prepared.interactions
@@ -160,7 +166,7 @@ class MLflowTracker:
             "retrievers.count": float(len(session.retrievers)),
         }
 
-    def _session_tags(self, session: Any) -> dict[str, str]:
+    def _session_tags(self, session: TrainingSession) -> dict[str, str]:
         return {
             "phase": "train",
             "environment": self.settings.environment,
@@ -179,14 +185,14 @@ class MLflowTracker:
             "run_name": self.settings.training.run_name,
         }
 
-    def _tracking_metadata(self, run_id: str) -> dict[str, str]:
-        return {
-            "run_id": run_id,
-            "experiment_name": self.config.experiment_name,
-            "tracking_uri": self.config.tracking_uri,
-        }
+    def _tracking_metadata(self, run_id: str) -> MlflowRunInfo:
+        return MlflowRunInfo(
+            run_id=run_id,
+            experiment_name=self.config.experiment_name,
+            tracking_uri=self.config.tracking_uri,
+        )
 
-    def log_training_session(self, session: Any) -> dict[str, str] | None:
+    def log_training_session(self, session: TrainingSession) -> MlflowRunInfo | None:
         if not self._configure():
             return None
         assert mlflow is not None
@@ -200,22 +206,33 @@ class MLflowTracker:
             self._log_metric_frames(Path(pipeline_config.eval_dir))
             return self._tracking_metadata(run.info.run_id)
 
-    def log_evaluation_summary(self, pipeline_config: Any, summary: dict[str, Any]) -> dict[str, str] | None:
+    def log_evaluation_summary(
+        self,
+        pipeline_config: PipelineConfig,
+        summary: EvaluationSummary,
+    ) -> MlflowRunInfo | None:
         if not self._configure():
             return None
         assert mlflow is not None
         with mlflow.start_run(run_name=self._run_name("evaluate")) as run:
             mlflow.set_tags(self._summary_tags())
             self._log_params(self.settings.safe_config())
-            self._log_artifact_if_exists(Path(summary["config_path"]), artifact_path="training")
-            self._log_artifacts_if_exists(Path(summary["eval_dir"]), artifact_path="evaluation")
+            if summary.config_path is not None:
+                self._log_artifact_if_exists(Path(summary.config_path), artifact_path="training")
+            if summary.eval_dir is not None:
+                self._log_artifacts_if_exists(Path(summary.eval_dir), artifact_path="evaluation")
             self._log_metric_frames(Path(pipeline_config.eval_dir))
             return self._tracking_metadata(run.info.run_id)
 
-    def log_bundle_export(self, session: Any, manifest: Any, extra_artifacts: list[Path] | None = None) -> None:
+    def log_bundle_export(
+        self,
+        session: TrainingSession,
+        manifest: BundleManifest,
+        extra_artifacts: list[Path] | None = None,
+    ) -> None:
         if not self._configure():
             return
-        run_id = getattr(session, "mlflow_run_id", None)
+        run_id = session.mlflow.run_id if session.mlflow is not None else None
         if not run_id:
             return
         assert mlflow is not None
@@ -231,7 +248,11 @@ class MLflowTracker:
             for artifact_path in extra_artifacts or []:
                 self._log_artifact_if_exists(Path(artifact_path), artifact_path="bundle")
 
-    def log_monitoring_summary(self, summary: Any, artifact_paths: dict[str, Path]) -> dict[str, str] | None:
+    def log_monitoring_summary(
+        self,
+        summary: MonitoringSummary,
+        artifact_paths: dict[str, Path],
+    ) -> MlflowRunInfo | None:
         if not self._configure_monitoring():
             return None
         assert mlflow is not None
@@ -258,8 +279,8 @@ class MLflowTracker:
             mlflow.log_metric("drift.concept.performance_drop", float(summary.concept_drift.performance_drop))
             for path in artifact_paths.values():
                 self._log_artifact_if_exists(Path(path), artifact_path="monitoring")
-            return {
-                "run_id": run.info.run_id,
-                "experiment_name": f"{self.config.experiment_name}-monitoring",
-                "tracking_uri": self.config.tracking_uri,
-            }
+            return MlflowRunInfo(
+                run_id=run.info.run_id,
+                experiment_name=f"{self.config.experiment_name}-monitoring",
+                tracking_uri=self.config.tracking_uri,
+            )

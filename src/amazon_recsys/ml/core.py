@@ -11,7 +11,7 @@ import gc
 from collections import Counter, defaultdict
 from dataclasses import MISSING, asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable, Protocol, TypeAlias
 
 import numpy as np
 import pandas as pd
@@ -23,18 +23,25 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 
 try:
     import xgboost as xgb
-except Exception:
+except ModuleNotFoundError:
     xgb = None
 
 try:
-    import tensorflow_recommenders as tfrs
-except Exception:
-    tfrs = None
-
-try:
     from tqdm.auto import tqdm as _tqdm
-except Exception:
+except ModuleNotFoundError:
     _tqdm = None
+
+# Legacy notebook compatibility alias. The package no longer imports TFRS directly.
+tfrs = None
+
+
+Record: TypeAlias = dict[str, object]
+RetrieverState: TypeAlias = dict[str, object] | tf.keras.Model
+MetricsHistory: TypeAlias = dict[str, object]
+
+
+class RankerPredictor(Protocol):
+    def predict(self, *args: object, **kwargs: object) -> object: ...
 
 
 REVIEW_FILE_NAMES = {
@@ -203,30 +210,38 @@ class SplitArtifacts:
 class RetrieverArtifacts:
     config: PipelineConfig
     variant: str
-    model: Any
-    item_encoder: Any
-    user_encoder: Any
+    model: RetrieverState
+    item_encoder: tf.keras.Model | None
+    user_encoder: tf.keras.Model | None
     item_embeddings: np.ndarray
     ann_index_path: Path | None
     ann_index: AnnoyIndex | None
     metrics: pd.DataFrame
     history: dict[str, list[float]]
     retriever_kind: str = "neural"
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: MetricsHistory = field(default_factory=dict)
 
 
 @dataclass
 class RankerArtifacts:
     config: PipelineConfig
-    model: Any
+    model: RankerPredictor
     metrics: pd.DataFrame
-    history: dict[str, Any]
+    history: MetricsHistory
     selected_retriever_variant: str
     backend: str = "xgboost"
 
 
+@dataclass(slots=True)
+class InferenceRequestContext:
+    user_identifier: str
+    history_item_idxs: list[int]
+    history_item_set: set[int]
+    inference_example: pd.DataFrame
+
+
 class _NullProgress:
-    def __init__(self, iterable: Iterable[Any] | None = None):
+    def __init__(self, iterable: Iterable[object] | None = None):
         self._iterable = iterable
 
     def __iter__(self):
@@ -249,7 +264,7 @@ class _NullProgress:
 
 
 def _progress(
-    iterable: Iterable[Any] | None = None,
+    iterable: Iterable[object] | None = None,
     *,
     total: int | None = None,
     desc: str | None = None,
@@ -331,7 +346,7 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
     return config
 
 
-def _cache_sensitive_config(config: PipelineConfig) -> dict[str, Any]:
+def _cache_sensitive_config(config: PipelineConfig) -> dict[str, object]:
     keys = {
         "cache_version",
         "run_profile",
@@ -362,8 +377,8 @@ def _should_force_rebuild_for_config(config: PipelineConfig) -> bool:
     try:
         with open(config_path, "r", encoding="utf-8") as handle:
             stored = json.load(handle)
-    except Exception:
-        return False
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return True
     current = _cache_sensitive_config(config)
     comparable_stored = {key: stored.get(key) for key in current}
     return comparable_stored != current
@@ -388,7 +403,7 @@ def _safe_rmtree(target: Path, workspace: Path) -> None:
             ) from exc
 
 
-def _iter_jsonl(path: Path, max_rows: int | None = None) -> Iterable[dict[str, Any]]:
+def _iter_jsonl(path: Path, max_rows: int | None = None) -> Iterable[Record]:
     import gzip
 
     opener = gzip.open if path.suffix == ".gz" else open
@@ -402,7 +417,7 @@ def _iter_jsonl(path: Path, max_rows: int | None = None) -> Iterable[dict[str, A
             yield json.loads(line)
 
 
-def _normalize_listlike(value: Any) -> list[str]:
+def _normalize_listlike(value: object) -> list[str]:
     if value is None:
         return []
     if isinstance(value, list):
@@ -415,7 +430,7 @@ def _normalize_listlike(value: Any) -> list[str]:
     return [str(value).strip()]
 
 
-def _parse_price(value: Any) -> float:
+def _parse_price(value: object) -> float:
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return np.nan
     if isinstance(value, (int, float)):
@@ -432,7 +447,7 @@ def _parse_price(value: Any) -> float:
         return np.nan
 
 
-def _coerce_float(value: Any) -> float:
+def _coerce_float(value: object) -> float:
     if value is None:
         return np.nan
     try:
@@ -444,7 +459,7 @@ def _coerce_float(value: Any) -> float:
     return coerced
 
 
-def _keep_review_record(config: PipelineConfig, category: str, row: dict[str, Any]) -> bool:
+def _keep_review_record(config: PipelineConfig, category: str, row: Record) -> bool:
     return _keep_review_record_with_fraction(config, category, row, base_keep_fraction=None)
 
 
@@ -472,8 +487,8 @@ def _load_raw_category_row_counts(config: PipelineConfig, force: bool = False) -
             counts = {category: int(payload.get(category, 0)) for category in config.categories}
             if set(counts) == set(config.categories):
                 return counts
-        except Exception:
-            pass
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            counts_path.unlink(missing_ok=True)
     counts: dict[str, int] = {}
     category_bar = _progress(
         config.categories,
@@ -523,7 +538,7 @@ def _category_keep_fraction_plan(
 def _keep_review_record_with_fraction(
     config: PipelineConfig,
     category: str,
-    row: dict[str, Any],
+    row: Record,
     base_keep_fraction: float | None,
 ) -> bool:
     if not config.dev_mode:
@@ -560,7 +575,7 @@ def load_reviews(
 ) -> pd.DataFrame:
     ensure_directories(config)
     categories = tuple(categories or config.categories)
-    rows: list[dict[str, Any]] = []
+    rows: list[Record] = []
     category_bar = _progress(categories, total=len(categories), desc="Audit review files", unit="category", disable=not config.show_progress)
     for category in category_bar:
         file_name = REVIEW_FILE_NAMES[category]
@@ -660,7 +675,7 @@ def load_metadata(
     missing = [c for c in categories if not (config.metadata_dir / f"meta_{c}.jsonl.gz").exists()]
     if missing and download_if_missing:
         download_metadata_files(config, categories=missing, force=False)
-    rows: list[dict[str, Any]] = []
+    rows: list[Record] = []
     category_bar = _progress(categories, total=len(categories), desc="Load metadata", unit="category", disable=not config.show_progress)
     for category in category_bar:
         path = config.metadata_dir / f"meta_{category}.jsonl.gz"
@@ -718,7 +733,7 @@ def load_metadata(
     return metadata
 
 
-def _flush_records_to_parquet(records: list[dict[str, Any]], output_path: Path) -> None:
+def _flush_records_to_parquet(records: list[Record], output_path: Path) -> None:
     if records:
         pd.DataFrame(records).to_parquet(output_path, index=False)
 
@@ -736,7 +751,7 @@ def _extract_review_signals(config: PipelineConfig, force: bool = False) -> tupl
         return pd.read_csv(raw_stats_path), positive_dir, hard_negative_dir
     positive_dir.mkdir(parents=True, exist_ok=True)
     hard_negative_dir.mkdir(parents=True, exist_ok=True)
-    stats_rows: list[dict[str, Any]] = []
+    stats_rows: list[Record] = []
     category_keep_fractions, category_target_rows, raw_category_counts = _category_keep_fraction_plan(config, force=force)
     category_bar = _progress(config.categories, total=len(config.categories), desc="Extract review signals", unit="category", disable=not config.show_progress)
     for category in category_bar:
@@ -744,8 +759,8 @@ def _extract_review_signals(config: PipelineConfig, force: bool = False) -> tupl
         if not source_path.exists():
             raise FileNotFoundError(f"Review file not found: {source_path}")
         base_keep_fraction = float(category_keep_fractions.get(category, config.dev_fraction))
-        positive_records: list[dict[str, Any]] = []
-        negative_records: list[dict[str, Any]] = []
+        positive_records: list[Record] = []
+        negative_records: list[Record] = []
         part_positive = 0
         part_negative = 0
         rating_counter: Counter = Counter()
@@ -881,7 +896,7 @@ def _compute_k_core_sets(config: PipelineConfig, positive_dir: Path, force: bool
     positive_chunks = sorted(positive_dir.glob("*.parquet"))
     if not positive_chunks:
         raise FileNotFoundError(f"No positive chunks found under {positive_dir}")
-    iteration_rows: list[dict[str, Any]] = []
+    iteration_rows: list[Record] = []
     valid_users: set[str] | None = None
     valid_items: set[str] | None = None
     iteration_bar = _progress(range(1, 20), total=19, desc="Compute k-core", unit="iter", disable=not config.show_progress)
@@ -1179,7 +1194,7 @@ def _compute_prefix_features(
     target_timestamp_ms: int,
     item_to_category: dict[int, str],
     categories: tuple[str, ...],
-) -> dict[str, Any]:
+) -> Record:
     history_item_idxs = prefix_rows["item_idx"].tolist()
     history_ratings = prefix_rows["rating"].astype(float).tolist()
     history_verified = prefix_rows["verified_purchase"].astype(float).tolist()
@@ -1213,9 +1228,9 @@ def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
     interactions["item_idx"] = interactions["parent_asin"].map(prepared.item_id_to_idx).astype(np.int32)
     interactions = interactions.sort_values(["user_id", "timestamp", "item_idx"]).reset_index(drop=True)
     user_sequence_frames: list[pd.DataFrame] = []
-    split_rows_train: list[dict[str, Any]] = []
-    split_rows_val: list[dict[str, Any]] = []
-    split_rows_test: list[dict[str, Any]] = []
+    split_rows_train: list[Record] = []
+    split_rows_val: list[Record] = []
+    split_rows_test: list[Record] = []
     example_id = 1
     for user_id, group in interactions.groupby("user_id", sort=False):
         if len(group) < max(config.k_core, 3):
@@ -1461,8 +1476,8 @@ def _item_dense_matrix(item_features: pd.DataFrame) -> np.ndarray:
     return item_features[dense_cols].fillna(0.0).to_numpy(dtype=np.float32, copy=False)
 
 
-def _build_item_lookup(prepared: PreparedArtifacts) -> dict[int, dict[str, Any]]:
-    lookup: dict[int, dict[str, Any]] = {}
+def _build_item_lookup(prepared: PreparedArtifacts) -> dict[int, Record]:
+    lookup: dict[int, Record] = {}
     dense_matrix = _item_dense_matrix(prepared.item_features)
     for row_number, row in enumerate(prepared.item_features.itertuples(index=False)):
         lookup[int(row.item_idx)] = {
@@ -1576,7 +1591,7 @@ def _build_retriever_training_examples(
     for category, group in prepared.item_features.groupby("source_category"):
         items_by_category[str(category)] = group["item_idx"].to_numpy(dtype=np.int32)
     global_items = prepared.item_features["item_idx"].to_numpy(dtype=np.int32)
-    rows: list[dict[str, Any]] = []
+    rows: list[Record] = []
     for _, row in train_examples.iterrows():
         base_row = {
             "user_idx": int(row["user_idx"]),
@@ -2024,7 +2039,7 @@ def popularity_by_category_candidates(
     examples: pd.DataFrame,
     top_k: int = 100,
 ) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
+    rows: list[Record] = []
     global_counter = split_artifacts.train_item_popularity
     for _, example in examples.iterrows():
         seen_items = set(example["history_item_idxs"])
@@ -2055,7 +2070,7 @@ def item_item_cooccurrence_candidates(
     examples: pd.DataFrame,
     top_k: int = 100,
 ) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
+    rows: list[Record] = []
     for _, example in examples.iterrows():
         seen_items = set(example["history_item_idxs"])
         score_counter: Counter = Counter()
@@ -2100,7 +2115,7 @@ def _ann_candidates_from_vectors(
     source_name: str,
     inject_target_if_missing: bool = True,
 ) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
+    rows: list[Record] = []
     seen_maps = {
         "train": split_artifacts.train_seen_map,
         "val": split_artifacts.val_seen_map,
@@ -2307,7 +2322,7 @@ def generate_candidates(
     if index is None:
         index = _load_ann_index(retriever.item_embeddings.shape[1], retriever.ann_index_path)
         retriever.ann_index = index
-    rows: list[dict[str, Any]] = []
+    rows: list[Record] = []
     seen_maps = {
         "train": split_artifacts.train_seen_map,
         "val": split_artifacts.val_seen_map,
@@ -2373,7 +2388,7 @@ def generate_candidates(
 def _metrics_from_ranked_candidates(candidates: pd.DataFrame, ks: tuple[int, ...] = (10, 50, 100)) -> pd.DataFrame:
     if candidates.empty:
         return pd.DataFrame(columns=["K", "recall", "mrr", "ndcg"])
-    metrics_rows: list[dict[str, Any]] = []
+    metrics_rows: list[Record] = []
     grouped = candidates.sort_values(["example_id", "rank"]).groupby("example_id", sort=False)
     for k in ks:
         hits = 0.0
@@ -2615,10 +2630,7 @@ def train_retrievers(prepared: PreparedArtifacts, split_artifacts: SplitArtifact
     retrievers["content_based"] = train_content_retriever(prepared, split_artifacts)
     retrievers["latent_cf"] = train_latent_cf_retriever(prepared, split_artifacts)
     if prepared.config.enable_neural_retriever:
-        try:
-            retrievers["two_tower"] = train_retriever(prepared, split_artifacts, variant="two_tower")
-        except Exception as exc:
-            print(f"Two-tower training failed; continuing with the classical retrievers only. {exc!r}")
+        retrievers["two_tower"] = train_retriever(prepared, split_artifacts, variant="two_tower")
     else:
         print("Skipping two_tower retriever for this run because CONFIG.enable_neural_retriever is False.")
     return retrievers
@@ -2749,7 +2761,7 @@ def _source_candidate_frames(
     return frames
 
 
-def _candidate_metadata_from_example(example: pd.Series) -> dict[str, Any]:
+def _candidate_metadata_from_example(example: pd.Series) -> Record:
     preference_features = {
         str(column): float(example[column])
         for column in example.index
@@ -2802,10 +2814,10 @@ def generate_candidate_union(
         "two_tower": 0.90,
         "popularity": 0.25,
     }
-    rows: list[dict[str, Any]] = []
+    rows: list[Record] = []
     for _, example in examples.iterrows():
         example_id = int(example["example_id"])
-        item_map: dict[int, dict[str, Any]] = {}
+        item_map: dict[int, Record] = {}
         example_meta = _candidate_metadata_from_example(example)
         source_order = ["cooccurrence", "latent_cf", "content_based", "two_tower"]
         for source_name in source_order:
@@ -2954,7 +2966,7 @@ def candidate_source_diagnostics(candidates: pd.DataFrame) -> dict[str, pd.DataF
         .sort_values(["hit_rate", "count"], ascending=[False, False])
         .reset_index(drop=True)
     )
-    source_rows: list[dict[str, Any]] = []
+    source_rows: list[Record] = []
     for source_name in ["cooccurrence", "latent_cf", "content_based", "two_tower", "popularity"]:
         flag_col = f"from_{source_name}"
         if flag_col not in candidates.columns:
@@ -3398,7 +3410,7 @@ def evaluate_ranker(
     prepared: PreparedArtifacts,
     split_artifacts: SplitArtifacts,
     retrievers: RetrieverArtifacts | dict[str, RetrieverArtifacts],
-    ranker_model: Any,
+    ranker_model: RankerPredictor,
     backend: str = "xgboost",
 ) -> pd.DataFrame:
     embedding_retriever = _select_embedding_retriever(retrievers)
@@ -3600,24 +3612,38 @@ def get_user_order_history(
     ].reset_index(drop=True)
 
 
-def recommend_hybrid(
+def _resolve_history_item_idxs(
     prepared: PreparedArtifacts,
     split_artifacts: SplitArtifacts,
-    retrievers: dict[str, RetrieverArtifacts],
-    ranker: RankerArtifacts | None = None,
-    user_id: str | None = None,
-    history_items: list[str] | None = None,
-    top_k: int = 20,
-) -> pd.DataFrame:
+    *,
+    user_id: str | None,
+    history_items: list[str] | None,
+) -> list[int]:
     if user_id is None and not history_items:
         raise ValueError("Provide either user_id or history_items.")
-    if history_items is None:
+    resolved_history_items = history_items
+    if resolved_history_items is None:
         history_frame = get_user_order_history(prepared, split_artifacts, str(user_id), split="test", limit=None)
-        history_items = history_frame["parent_asin"].tolist()
-    history_item_idxs = [prepared.item_id_to_idx[item] for item in history_items if item in prepared.item_id_to_idx]
+        resolved_history_items = history_frame["parent_asin"].tolist()
+    history_item_idxs = [prepared.item_id_to_idx[item] for item in resolved_history_items if item in prepared.item_id_to_idx]
     if not history_item_idxs:
         raise ValueError("No usable history items were found in the current item catalog.")
-    history_item_set = set(history_item_idxs)
+    return history_item_idxs
+
+
+def _build_inference_request_context(
+    prepared: PreparedArtifacts,
+    split_artifacts: SplitArtifacts,
+    *,
+    user_id: str | None,
+    history_items: list[str] | None,
+) -> InferenceRequestContext:
+    history_item_idxs = _resolve_history_item_idxs(
+        prepared,
+        split_artifacts,
+        user_id=user_id,
+        history_items=history_items,
+    )
     user_identifier = str(user_id or "__cold_start__")
     user_idx = split_artifacts.user_id_to_idx.get(user_identifier, 0)
     prefix_df = pd.DataFrame(
@@ -3628,12 +3654,14 @@ def recommend_hybrid(
             "timestamp": np.arange(len(history_item_idxs), dtype=np.int64),
         }
     )
+    item_categories = dict(zip(prepared.item_features["item_idx"], prepared.item_features["source_category"]))
     prefix_features = _compute_prefix_features(
         prefix_df.tail(prepared.config.history_len),
         int(prefix_df["timestamp"].max()) + 1,
-        dict(zip(prepared.item_features["item_idx"], prepared.item_features["source_category"])),
+        item_categories,
         prepared.config.categories,
     )
+    target_item_idx = history_item_idxs[-1]
     inference_example = pd.DataFrame(
         [
             {
@@ -3641,57 +3669,139 @@ def recommend_hybrid(
                 "split": "inference",
                 "user_id": user_identifier,
                 "user_idx": user_idx,
-                "target_item_idx": history_item_idxs[-1],
-                "target_parent_asin": prepared.item_idx_to_id[history_item_idxs[-1]],
-                "target_source_category": prepared.item_features.iloc[history_item_idxs[-1] - 1]["source_category"],
+                "target_item_idx": target_item_idx,
+                "target_parent_asin": prepared.item_idx_to_id[target_item_idx],
+                "target_source_category": str(item_categories.get(target_item_idx, "")),
                 "target_timestamp": pd.Timestamp.utcnow(),
                 **prefix_features,
             }
         ]
     )
+    return InferenceRequestContext(
+        user_identifier=user_identifier,
+        history_item_idxs=history_item_idxs,
+        history_item_set=set(history_item_idxs),
+        inference_example=inference_example,
+    )
+
+
+def _exclude_seen_candidates(candidates: pd.DataFrame, seen_items: set[int]) -> pd.DataFrame:
+    if candidates.empty:
+        return candidates.copy()
+    return candidates[~candidates["item_idx"].isin(seen_items)].copy()
+
+
+def _recommendation_item_metadata(prepared: PreparedArtifacts) -> pd.DataFrame:
+    return prepared.item_features[["item_idx", "parent_asin", "title", "source_category", "price", "average_rating"]].copy()
+
+
+def _empty_recommendation_output(*, include_candidate_sources: bool, include_score: bool) -> pd.DataFrame:
+    columns = ["parent_asin", "title", "source_category", "price", "average_rating"]
+    if include_candidate_sources:
+        columns.append("candidate_sources")
+    columns.append("retrieval_score")
+    if include_score:
+        columns.append("score")
+    return pd.DataFrame(columns=columns)
+
+
+def _score_inference_candidates(
+    prepared: PreparedArtifacts,
+    split_artifacts: SplitArtifacts,
+    retriever: RetrieverArtifacts | dict[str, RetrieverArtifacts],
+    ranker: RankerArtifacts | None,
+    candidates: pd.DataFrame,
+) -> pd.DataFrame:
+    if ranker is None or candidates.empty:
+        return candidates
+    embedding_retriever = _select_embedding_retriever(retriever)
+    if ranker.backend == "xgboost":
+        ranker_metadata, feature_frame, _, _ = _xgboost_ranker_frame(prepared, split_artifacts, embedding_retriever, candidates)
+        ranker_metadata["score"] = ranker.model.predict(feature_frame).reshape(-1)
+        del feature_frame
+        gc.collect()
+        return ranker_metadata
+    ranker_metadata, features, _ = _build_ranker_payload(prepared, split_artifacts, embedding_retriever, candidates)
+    ranker_metadata["score"] = ranker.model.predict(features, batch_size=prepared.config.ranker_batch_size, verbose=0).reshape(-1)
+    del features
+    gc.collect()
+    return ranker_metadata
+
+
+def _finalize_recommendation_output(
+    prepared: PreparedArtifacts,
+    candidates: pd.DataFrame,
+    ranked_candidates: pd.DataFrame,
+    *,
+    top_k: int,
+    include_candidate_sources: bool,
+    include_score: bool,
+) -> pd.DataFrame:
+    if ranked_candidates.empty:
+        return _empty_recommendation_output(
+            include_candidate_sources=include_candidate_sources,
+            include_score=include_score,
+        )
+    output = (
+        ranked_candidates.sort_values("score" if include_score else "retrieval_score", ascending=False)
+        .drop_duplicates("item_idx")
+        .head(top_k)
+        .merge(_recommendation_item_metadata(prepared), on="item_idx", how="left")
+    )
+    if include_candidate_sources and "candidate_sources" in candidates.columns:
+        output = output.merge(
+            candidates[["item_idx", "candidate_sources"]].drop_duplicates("item_idx"),
+            on="item_idx",
+            how="left",
+        )
+    columns = ["parent_asin", "title", "source_category", "price", "average_rating"]
+    if include_candidate_sources:
+        columns.append("candidate_sources")
+    columns.append("retrieval_score")
+    if include_score:
+        columns.append("score")
+    return output[columns].reset_index(drop=True)
+
+
+def recommend_hybrid(
+    prepared: PreparedArtifacts,
+    split_artifacts: SplitArtifacts,
+    retrievers: dict[str, RetrieverArtifacts],
+    ranker: RankerArtifacts | None = None,
+    user_id: str | None = None,
+    history_items: list[str] | None = None,
+    top_k: int = 20,
+) -> pd.DataFrame:
+    request = _build_inference_request_context(
+        prepared,
+        split_artifacts,
+        user_id=user_id,
+        history_items=history_items,
+    )
     candidates = generate_candidate_union(
         prepared,
         split_artifacts,
         retrievers,
-        inference_example,
+        request.inference_example,
         top_k=max(top_k * 10, prepared.config.candidate_union_top_k),
         include_candidate_sources=True,
     )
-    candidates = candidates[~candidates["item_idx"].isin(history_item_set)].copy()
-    item_meta = prepared.item_features[["item_idx", "parent_asin", "title", "source_category", "price", "average_rating"]].copy()
-    if ranker is not None and ranker.backend == "xgboost":
-        embedding_retriever = _select_embedding_retriever(retrievers)
-        ranker_metadata, feature_frame, _, _ = _xgboost_ranker_frame(prepared, split_artifacts, embedding_retriever, candidates)
-        ranker_metadata["score"] = ranker.model.predict(feature_frame).reshape(-1)
-        output = (
-            ranker_metadata.sort_values("score", ascending=False)
-            .drop_duplicates("item_idx")
-            .head(top_k)
-            .merge(item_meta, on="item_idx", how="left")
-            .merge(candidates[["item_idx", "candidate_sources"]].drop_duplicates("item_idx"), on="item_idx", how="left")
-            [["parent_asin", "title", "source_category", "price", "average_rating", "candidate_sources", "retrieval_score", "score"]]
-        )
-    elif ranker is not None:
-        embedding_retriever = _select_embedding_retriever(retrievers)
-        ranker_metadata, features, _ = _build_ranker_payload(prepared, split_artifacts, embedding_retriever, candidates)
-        ranker_metadata["score"] = ranker.model.predict(features, batch_size=prepared.config.ranker_batch_size, verbose=0).reshape(-1)
-        output = (
-            ranker_metadata.sort_values("score", ascending=False)
-            .drop_duplicates("item_idx")
-            .head(top_k)
-            .merge(item_meta, on="item_idx", how="left")
-            .merge(candidates[["item_idx", "candidate_sources"]].drop_duplicates("item_idx"), on="item_idx", how="left")
-            [["parent_asin", "title", "source_category", "price", "average_rating", "candidate_sources", "retrieval_score", "score"]]
-        )
-    else:
-        output = (
-            candidates.sort_values("retrieval_score", ascending=False)
-            .drop_duplicates("item_idx")
-            .head(top_k)
-            .merge(item_meta, on="item_idx", how="left")
-            [["parent_asin", "title", "source_category", "price", "average_rating", "candidate_sources", "retrieval_score"]]
-        )
-    return output.reset_index(drop=True)
+    candidates = _exclude_seen_candidates(candidates, request.history_item_set)
+    ranked_candidates = _score_inference_candidates(
+        prepared,
+        split_artifacts,
+        retrievers,
+        ranker,
+        candidates,
+    )
+    return _finalize_recommendation_output(
+        prepared,
+        candidates,
+        ranked_candidates,
+        top_k=top_k,
+        include_candidate_sources=True,
+        include_score=ranker is not None,
+    )
 
 
 def recommend(
@@ -3705,84 +3815,30 @@ def recommend(
 ) -> pd.DataFrame:
     if isinstance(retriever, dict):
         return recommend_hybrid(prepared, split_artifacts, retriever, ranker=ranker, user_id=user_id, history_items=history_items, top_k=top_k)
-    if user_id is None and not history_items:
-        raise ValueError("Provide either user_id or history_items.")
-    if history_items is None:
-        history_frame = get_user_order_history(prepared, split_artifacts, str(user_id), split="test", limit=None)
-        history_items = history_frame["parent_asin"].tolist()
-    history_item_idxs = [prepared.item_id_to_idx[item] for item in history_items if item in prepared.item_id_to_idx]
-    if not history_item_idxs:
-        raise ValueError("No usable history items were found in the current item catalog.")
-    history_item_set = set(history_item_idxs)
-    user_identifier = str(user_id or "__cold_start__")
-    user_idx = split_artifacts.user_id_to_idx.get(user_identifier, 0)
-    prefix_df = pd.DataFrame(
-        {
-            "item_idx": history_item_idxs,
-            "rating": [5.0] * len(history_item_idxs),
-            "verified_purchase": [1] * len(history_item_idxs),
-            "timestamp": np.arange(len(history_item_idxs), dtype=np.int64),
-        }
-    )
-    prefix_features = _compute_prefix_features(
-        prefix_df.tail(prepared.config.history_len),
-        int(prefix_df["timestamp"].max()) + 1,
-        dict(zip(prepared.item_features["item_idx"], prepared.item_features["source_category"])),
-        prepared.config.categories,
-    )
-    inference_example = pd.DataFrame(
-        [
-            {
-                "example_id": 1,
-                "split": "inference",
-                "user_id": user_identifier,
-                "user_idx": user_idx,
-                "target_item_idx": history_item_idxs[-1],
-                "target_parent_asin": prepared.item_idx_to_id[history_item_idxs[-1]],
-                "target_timestamp": pd.Timestamp.utcnow(),
-                **prefix_features,
-            }
-        ]
+    request = _build_inference_request_context(
+        prepared,
+        split_artifacts,
+        user_id=user_id,
+        history_items=history_items,
     )
     candidate_top_k = max(top_k * 5, prepared.config.retrieval_top_k)
-    candidates = generate_candidates(prepared, split_artifacts, retriever, inference_example, top_k=candidate_top_k)
-    candidates = candidates[~candidates["item_idx"].isin(history_item_set)].copy()
-    item_meta = prepared.item_features[["item_idx", "parent_asin", "title", "source_category", "price", "average_rating"]].copy()
-    if ranker is not None and ranker.backend == "xgboost":
-        ranker_metadata, feature_frame, _, _ = _xgboost_ranker_frame(prepared, split_artifacts, retriever, candidates)
-        ranker_metadata["score"] = ranker.model.predict(feature_frame).reshape(-1)
-        output = (
-            ranker_metadata.sort_values("score", ascending=False)
-            .drop_duplicates("item_idx")
-            .head(top_k)
-            .merge(item_meta, on="item_idx", how="left")
-            [["parent_asin", "title", "source_category", "price", "average_rating", "retrieval_score", "score"]]
-        )
-        del ranker_metadata
-        del feature_frame
-        gc.collect()
-    elif ranker is not None:
-        ranker_metadata, features, _ = _build_ranker_payload(prepared, split_artifacts, retriever, candidates)
-        ranker_metadata["score"] = ranker.model.predict(features, batch_size=prepared.config.ranker_batch_size, verbose=0).reshape(-1)
-        output = (
-            ranker_metadata.sort_values("score", ascending=False)
-            .drop_duplicates("item_idx")
-            .head(top_k)
-            .merge(item_meta, on="item_idx", how="left")
-            [["parent_asin", "title", "source_category", "price", "average_rating", "retrieval_score", "score"]]
-        )
-        del ranker_metadata
-        del features
-        gc.collect()
-    else:
-        output = (
-            candidates.sort_values("retrieval_score", ascending=False)
-            .drop_duplicates("item_idx")
-            .head(top_k)
-            .merge(item_meta, on="item_idx", how="left")
-            [["parent_asin", "title", "source_category", "price", "average_rating", "retrieval_score"]]
-        )
-    return output.reset_index(drop=True)
+    candidates = generate_candidates(prepared, split_artifacts, retriever, request.inference_example, top_k=candidate_top_k)
+    candidates = _exclude_seen_candidates(candidates, request.history_item_set)
+    ranked_candidates = _score_inference_candidates(
+        prepared,
+        split_artifacts,
+        retriever,
+        ranker,
+        candidates,
+    )
+    return _finalize_recommendation_output(
+        prepared,
+        candidates,
+        ranked_candidates,
+        top_k=top_k,
+        include_candidate_sources=False,
+        include_score=ranker is not None,
+    )
 
 
 def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
@@ -3842,3 +3898,4 @@ def save_config(config: PipelineConfig) -> Path:
     with open(config_path, "w", encoding="utf-8") as handle:
         json.dump(serializable, handle, indent=2)
     return config_path
+

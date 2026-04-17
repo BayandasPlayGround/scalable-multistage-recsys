@@ -3,19 +3,22 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from statistics import mean
-from typing import Any
 
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import (
+    ActiveModelSummary,
     AvailableUser,
     BundleManifest,
+    EvaluationSummary,
     HistoryItem,
     RecommendationItem,
+    ReadyState,
     RuntimeBundle,
     UserProfile,
+    UserProfilePayload,
     utcnow_iso,
 )
-from amazon_recsys.infrastructure.artifacts import LocalArtifactStore
+from amazon_recsys.domain.protocols import ArtifactStore, RecommendationTelemetry
 from amazon_recsys.ml import core
 
 
@@ -38,17 +41,22 @@ def _mock_bundle(settings: AppSettings) -> RuntimeBundle:
     )
     return RuntimeBundle(
         manifest=manifest,
-        evaluation_summary={
-            "source": "mock",
-            "message": "No active bundle is available yet. Train and activate a bundle to replace mock responses.",
-            "metric_files": [],
-        },
+        evaluation_summary=EvaluationSummary(
+            source="mock",
+            message="No active bundle is available yet. Train and activate a bundle to replace mock responses.",
+            metric_files=[],
+        ),
         is_mock=True,
     )
 
 
 class BundleRecommendationService:
-    def __init__(self, artifact_store: LocalArtifactStore, settings: AppSettings, monitoring_service: Any | None = None) -> None:
+    def __init__(
+        self,
+        artifact_store: ArtifactStore,
+        settings: AppSettings,
+        monitoring_service: RecommendationTelemetry | None = None,
+    ) -> None:
         self.artifact_store = artifact_store
         self.settings = settings
         self.monitoring_service = monitoring_service
@@ -77,17 +85,17 @@ class BundleRecommendationService:
         self._bundle_version = manifest.version
         return bundle
 
-    def readiness(self) -> dict[str, Any]:
+    def readiness(self) -> ReadyState:
         try:
             bundle = self._load_bundle()
         except FileNotFoundError:
-            return {"ready": False, "status": "not_ready", "source": "none", "version": None}
-        return {
-            "ready": True,
-            "status": "ready",
-            "source": "mock" if bundle.is_mock else "bundle",
-            "version": bundle.manifest.version,
-        }
+            return ReadyState(ready=False, status="not_ready", source="none", version=None)
+        return ReadyState(
+            ready=True,
+            status="ready",
+            source="mock" if bundle.is_mock else "bundle",
+            version=bundle.manifest.version,
+        )
 
     def recommend(
         self,
@@ -113,7 +121,7 @@ class BundleRecommendationService:
                     top_k=effective_top_k,
                     items=items,
                 )
-            except Exception:
+            except OSError:
                 LOGGER.exception("Failed to record recommendation inference for monitoring.")
         return items
 
@@ -239,7 +247,7 @@ class BundleRecommendationService:
         *,
         history_limit: int = 20,
         recommendation_limit: int = 5,
-    ) -> dict[str, Any]:
+    ) -> UserProfilePayload:
         bundle = self._load_bundle()
         if bundle.is_mock:
             raise KeyError(f"Unknown user_id: {user_id}")
@@ -271,11 +279,7 @@ class BundleRecommendationService:
             history_items=None,
             top_k=recommendation_limit,
         )
-        return {
-            "profile": profile,
-            "history": history,
-            "recommendations": recommendations,
-        }
+        return UserProfilePayload(profile=profile, history=history, recommendations=recommendations)
 
     def list_available_users(
         self,
@@ -355,19 +359,19 @@ class BundleRecommendationService:
             )
         return available_users
 
-    def get_active_model(self) -> dict[str, Any]:
+    def get_active_model(self) -> ActiveModelSummary:
         bundle = self._load_bundle()
-        return {
-            "ready": True,
-            "source": "mock" if bundle.is_mock else "bundle",
-            "version": bundle.manifest.version,
-            "run_name": bundle.manifest.run_name,
-            "run_profile": bundle.manifest.run_profile,
-            "model_backend": bundle.manifest.model_backend,
-            "retriever_variants": bundle.manifest.retriever_variants,
-            "created_at": bundle.manifest.created_at,
-        }
+        return ActiveModelSummary(
+            ready=True,
+            source="mock" if bundle.is_mock else "bundle",
+            version=bundle.manifest.version,
+            run_name=bundle.manifest.run_name,
+            run_profile=bundle.manifest.run_profile,
+            model_backend=bundle.manifest.model_backend,
+            retriever_variants=bundle.manifest.retriever_variants,
+            created_at=bundle.manifest.created_at,
+        )
 
-    def get_evaluation_summary(self) -> dict[str, Any]:
+    def get_evaluation_summary(self) -> EvaluationSummary:
         bundle = self._load_bundle()
         return bundle.evaluation_summary

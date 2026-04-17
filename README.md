@@ -1,25 +1,17 @@
-﻿# Amazon RecSys
+# Amazon RecSys
 
-Amazon RecSys is an Azure-first, end-to-end recommender systems project that trains a multi-stage recommendation pipeline on Amazon review data, packages the trained artifacts into versioned serving bundles, tracks experiments with MLflow, and serves recommendations through a FastAPI web application with an analytics-focused UI.
+Amazon RecSys is a package-owned multi-stage recommender built on Amazon review data. It trains hybrid retrieval plus ranking pipelines, exports versioned runtime bundles, serves the active bundle through FastAPI and Jinja, and records MLflow and monitoring artifacts around that flow.
 
-The current source of truth is the package under `src/amazon_recsys/`. The notebook-facing file `notebooks/amazon_recsys_pipeline.py` is a compatibility layer over the package-owned ML core.
-
-## Table of Contents
-
-- [What This Repo Does](#what-this-repo-does)
-- [Quick Start](#quick-start)
-- [Documentation](#documentation)
-- [Repository At A Glance](#repository-at-a-glance)
-- [Current Status](#current-status)
+`src/amazon_recsys/` is the source of truth. `notebooks/amazon_recsys_pipeline.py` and `notebooks/RecSys.ipynb` remain as notebook-facing compatibility layers over the same package-owned ML core.
 
 ## What This Repo Does
 
-- Trains a hybrid recommender with classical retrieval plus XGBoost ranking.
-- Exports versioned serving bundles for online inference.
-- Serves recommendations through FastAPI + Jinja.
-- Tracks training and monitoring runs in MLflow.
-- Computes scheduled batch data drift and concept drift from logged inference events and delayed outcomes.
-- Keeps Azure deployment as the primary target without hard-coding business logic to Azure SDKs.
+- trains a hybrid recommender with popularity, cooccurrence, latent CF, content-based retrieval, and an optional two-tower retriever
+- ranks candidate sets with XGBoost by default, with `dlrm` kept as an experimental backend
+- exports and activates versioned serving bundles for online inference
+- serves recommendation, history, model, evaluation, and monitoring endpoints through FastAPI plus a Jinja UI
+- logs training and monitoring runs to MLflow when enabled
+- computes batch feature drift and concept drift from served inference logs and delayed outcomes
 
 ## Quick Start
 
@@ -35,17 +27,15 @@ Open:
 - `http://127.0.0.1:8000/`
 - `http://127.0.0.1:8000/docs`
 
-The command that actually trains the model is:
+The training and export entry point is:
 
 ```powershell
 python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
 ```
 
-If you want the full local/prod runbook, MLflow setup, or monitoring workflow, use the docs below.
-
 ## Documentation
 
-Detailed docs now live under [`docs/`](docs/README.md).
+Detailed guides live under [`docs/`](docs/README.md).
 
 - [Docs Hub](docs/README.md)
 - [Architecture Guide](docs/architecture.md)
@@ -53,84 +43,29 @@ Detailed docs now live under [`docs/`](docs/README.md).
 - [MLflow Guide](docs/mlflow.md)
 - [Drift Monitoring Guide](docs/monitoring.md)
 
-## Repository At A Glance
+## Key Paths
 
-```text
-.
-|-- README.md
-|-- docs/
-|   |-- README.md
-|   |-- architecture.md
-|   |-- running-the-app.md
-|   |-- mlflow.md
-|   `-- monitoring.md
-|-- src/
-|   `-- amazon_recsys/
-|       |-- api/
-|       |-- application/
-|       |-- cli/
-|       |-- config/
-|       |-- domain/
-|       |-- infrastructure/
-|       |-- ml/
-|       |-- monitoring/
-|       |-- observability/
-|       `-- web/
-|-- tests/
-|   |-- conftest.py
-|   |-- test_api_app.py
-|   |-- test_container.py
-|   |-- test_mlflow_integration.py
-|   |-- test_monitoring_integration.py
-|   |-- test_monitoring_metrics.py
-|   |-- test_notebook_compatibility.py
-|   |-- test_pipeline_integration.py
-|   |-- test_runtime_modes.py
-|   `-- test_template.py
-|-- notebooks/
-|   |-- README.md
-|   `-- amazon_recsys_pipeline.py
-|-- infra/
-|   `-- azure/
-|       |-- aks/
-|       |-- aml/
-|       `-- bicep/
-|-- .github/
-|   `-- workflows/
-|-- app.py
-|-- template.py
-|-- Dockerfile
-|-- docker-compose.yml
-|-- pyproject.toml
-|-- Requirements.txt
-`-- .env.example
-```
-
-Key paths:
-
-- `docs/`: detailed project guides split out from the main README
-- `src/amazon_recsys/ml/core.py`: current recommender engine
-- `src/amazon_recsys/application/services.py`: bundle-backed serving layer
-- `src/amazon_recsys/monitoring/`: drift monitoring subsystem
-- `src/amazon_recsys/cli/main.py`: train/evaluate/export/serve/monitor CLI
+- `src/amazon_recsys/ml/core.py`: recommender training, retrieval, ranking, and bundle-facing artifacts
+- `src/amazon_recsys/application/services.py`: active-bundle recommendation service and serving fallback behavior
+- `src/amazon_recsys/api/`: FastAPI routers for health, models, recommendations, and monitoring
+- `src/amazon_recsys/monitoring/`: reference profiles, inference and outcome logging, and drift computation
+- `src/amazon_recsys/cli/main.py`: train, evaluate, export, activate, serve, and monitor commands
 - `notebooks/amazon_recsys_pipeline.py`: notebook compatibility import surface
 
-## Current Status
+## Current Role Of The Repo
 
-Already in place:
+Primary runtime:
 
-- package-owned ML core
-- versioned serving bundles
-- FastAPI + Jinja app
-- MLflow training tracking
-- scheduled batch drift monitoring
-- local and production-like tests
-- Azure deployment scaffolding
+- package-owned recommender logic
+- bundle export and activation
+- FastAPI plus Jinja serving
+- MLflow integration
+- batch monitoring based on served traffic and delayed outcomes
 
-Still evolving:
+Secondary support:
 
-- deeper decomposition of `ml/core.py`
-- broader bundle export support beyond the current default path
-- live Azure validation and scheduled cloud monitoring jobs
+- notebook compatibility for existing exploration workflows
+- `template.py` for bootstrap/template generation
+- `infra/azure/` and workflow files for deployment-oriented support
 
-Use `src/amazon_recsys/` as the source of truth and treat the notebooks as consumers of that package.
+Use `src/amazon_recsys/` as the source of truth and treat notebooks and deployment/template assets as consumers or support layers around that package.

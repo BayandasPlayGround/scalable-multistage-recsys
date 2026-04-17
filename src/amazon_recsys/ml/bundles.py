@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import BundleManifest, RuntimeBundle
+
+if TYPE_CHECKING:
+    from amazon_recsys.ml.pipelines import TrainingSession
 
 
 def generate_bundle_version(run_name: str) -> str:
@@ -17,7 +20,7 @@ def generate_bundle_version(run_name: str) -> str:
 
 def build_bundle_manifest(
     settings: AppSettings,
-    session: Any,
+    session: TrainingSession,
     version: str,
     bundle_dir: Path,
 ) -> BundleManifest:
@@ -39,15 +42,17 @@ def build_bundle_manifest(
             "workspace_root": str(settings.workspace_root),
             "legacy_workspace_root": str(settings.legacy_workspace_root),
             "legacy_artifact_root": str(settings.legacy_artifact_root),
-            "mlflow_tracking_enabled": bool(getattr(session, "mlflow_run_id", None)),
-            "mlflow_tracking_uri": getattr(session, "mlflow_tracking_uri", None),
-            "mlflow_experiment_name": getattr(session, "mlflow_experiment_name", None),
-            "mlflow_run_id": getattr(session, "mlflow_run_id", None),
+            "mlflow_tracking_enabled": bool(session.mlflow is not None),
+            "mlflow_tracking_uri": session.mlflow.tracking_uri if session.mlflow is not None else None,
+            "mlflow_experiment_name": session.mlflow.experiment_name if session.mlflow is not None else None,
+            "mlflow_run_id": session.mlflow.run_id if session.mlflow is not None else None,
         },
     )
 
 
-def _sanitize_runtime_objects(session: Any) -> tuple[Any, Any, dict[str, Any], Any]:
+def _sanitize_runtime_objects(
+    session: TrainingSession,
+) -> tuple[object, object, dict[str, object], object]:
     prepared = session.prepared
     if hasattr(prepared, "item_text_matrix"):
         prepared.item_text_matrix = np.asarray(prepared.item_text_matrix)
@@ -65,7 +70,7 @@ def _sanitize_runtime_objects(session: Any) -> tuple[Any, Any, dict[str, Any], A
     return prepared, session.split_artifacts, retrievers, ranker
 
 
-def build_runtime_bundle(session: Any, manifest: BundleManifest) -> RuntimeBundle:
+def build_runtime_bundle(session: TrainingSession, manifest: BundleManifest) -> RuntimeBundle:
     prepared, split_artifacts, retrievers, ranker = _sanitize_runtime_objects(session)
     return RuntimeBundle(
         manifest=manifest,

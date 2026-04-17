@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import timedelta
-from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from amazon_recsys.config.settings import MonitoringConfig
-from amazon_recsys.domain.entities import ConceptDriftResult, FeatureDriftResult, MonitoringSummary, ReferenceProfile
+from amazon_recsys.domain.entities import (
+    CategoricalFeatureProfile,
+    ConceptDriftResult,
+    FeatureDriftResult,
+    MonitoringSummary,
+    NumericFeatureProfile,
+    ReferenceProfile,
+)
 from amazon_recsys.monitoring.utils import MONITORED_K, STATUS_RANK, max_status, safe_float, split_candidate_sources
 
 
@@ -21,7 +27,7 @@ def _clean_numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").dropna().astype(float)
 
 
-def numeric_profile(series: pd.Series, *, bin_count: int = 5) -> dict[str, Any]:
+def numeric_profile(series: pd.Series, *, bin_count: int = 5) -> NumericFeatureProfile:
     values = _clean_numeric_series(series)
     if values.empty:
         return {
@@ -52,7 +58,7 @@ def numeric_profile(series: pd.Series, *, bin_count: int = 5) -> dict[str, Any]:
     }
 
 
-def categorical_profile(values: list[str]) -> dict[str, Any]:
+def categorical_profile(values: list[str]) -> CategoricalFeatureProfile:
     cleaned = [str(value) for value in values if value not in {None, ""}]
     if not cleaned:
         return {"proportions": {"__empty__": 1.0}, "sample_size": 0}
@@ -65,7 +71,10 @@ def categorical_profile(values: list[str]) -> dict[str, Any]:
     }
 
 
-def _distribution_with_reference_bins(series: pd.Series, profile: dict[str, Any]) -> tuple[list[float], dict[str, Any]]:
+def _distribution_with_reference_bins(
+    series: pd.Series,
+    profile: NumericFeatureProfile,
+) -> tuple[list[float], NumericFeatureProfile]:
     values = _clean_numeric_series(series)
     bin_edges = np.asarray(profile.get("bin_edges", [0.0, 1.0]), dtype=float)
     if len(bin_edges) < 2:
@@ -89,7 +98,10 @@ def _distribution_with_reference_bins(series: pd.Series, profile: dict[str, Any]
     )
 
 
-def _distribution_with_reference_categories(values: list[str], profile: dict[str, Any]) -> tuple[dict[str, float], dict[str, Any]]:
+def _distribution_with_reference_categories(
+    values: list[str],
+    profile: CategoricalFeatureProfile,
+) -> tuple[dict[str, float], CategoricalFeatureProfile]:
     cleaned = [str(value) for value in values if value not in {None, ""}]
     reference_keys = list((profile.get("proportions") or {"__empty__": 1.0}).keys())
     counts = pd.Series(cleaned, dtype="string").value_counts(dropna=False).to_dict() if cleaned else {}
@@ -100,7 +112,7 @@ def _distribution_with_reference_categories(values: list[str], profile: dict[str
         current = {key: float(counts.get(key, 0) / total) for key in reference_keys}
         for key in counts:
             current.setdefault(str(key), float(counts[key] / total))
-    return current, {"sample_size": int(total)}
+    return current, {"proportions": current, "sample_size": int(total)}
 
 
 def population_stability_index(reference: list[float], current: list[float]) -> float:

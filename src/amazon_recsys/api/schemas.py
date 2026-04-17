@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field, model_validator
+
+JsonObject = dict[str, object]
 
 
 class HealthResponse(BaseModel):
@@ -93,7 +93,7 @@ class AvailableUsersResponse(BaseModel):
 
 
 class ConfigResponse(BaseModel):
-    config: dict[str, Any]
+    config: JsonObject
 
 
 class ModelSummaryResponse(BaseModel):
@@ -109,16 +109,16 @@ class ModelSummaryResponse(BaseModel):
 
 class EvaluationSummaryResponse(BaseModel):
     source: str
-    summary: dict[str, Any]
+    summary: JsonObject
 
 
 class MonitoringSummaryResponse(BaseModel):
     available: bool
     bundle_version: str | None = None
     status: str | None = None
-    summary: dict[str, Any] = Field(default_factory=dict)
+    summary: JsonObject = Field(default_factory=dict)
 
 
 class MonitoringHistoryResponse(BaseModel):
     total: int
-    items: list[dict[str, Any]] = Field(default_factory=list)
+    items: list[JsonObject] = Field(default_factory=list)

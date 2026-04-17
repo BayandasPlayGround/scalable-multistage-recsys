@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from amazon_recsys.api.dependencies import get_monitoring_service
 from amazon_recsys.api.schemas import MonitoringHistoryResponse, MonitoringSummaryResponse
 from amazon_recsys.monitoring.service import MonitoringService
+from amazon_recsys.presentation.dependencies import get_monitoring_service
 
 
 router = APIRouter(tags=["monitoring"])

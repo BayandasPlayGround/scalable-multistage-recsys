@@ -4,7 +4,6 @@ import os
 import re
 import signal
 import threading
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -12,8 +11,9 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from amazon_recsys.api.dependencies import get_recommendation_service
 from amazon_recsys.application.services import BundleRecommendationService
+from amazon_recsys.domain.entities import EvaluationSummary
+from amazon_recsys.presentation.dependencies import get_recommendation_service
 
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
@@ -31,7 +31,7 @@ def _split_history_items(raw_value: str | None) -> list[str] | None:
 def _terminate_local_process() -> None:
     try:
         os.kill(os.getpid(), signal.SIGTERM)
-    except Exception:
+    except OSError:
         os._exit(0)
 
 
@@ -177,12 +177,12 @@ def index(
     effective_selected_user_id = selected_user_id or user_id
     recommendations = []
     history = []
-    selected_user_profile = {}
+    selected_user_profile = None
     selected_user_history = []
     selected_user_recommendations = []
     error = None
     active_model = service.readiness()
-    evaluation_summary = {}
+    evaluation_summary = EvaluationSummary()
     monitoring_summary = {}
     monitoring_history = []
     monitoring_trends = []
@@ -196,7 +196,7 @@ def index(
         monitoring_history = [item.to_dict() for item in monitoring_service.recent_summaries(limit=8)]
         monitoring_trends = _build_monitoring_trends(monitoring_history)
         available_users = service.list_available_users(limit=250, min_history=3)
-    except Exception as exc:
+    except FileNotFoundError as exc:
         error = str(exc)
 
     if effective_selected_user_id:
@@ -206,10 +206,10 @@ def index(
                 history_limit=20,
                 recommendation_limit=min(top_k, 6),
             )
-            selected_user_profile = asdict(user_payload["profile"])
-            selected_user_history = [asdict(item) for item in user_payload["history"]]
-            selected_user_recommendations = [asdict(item) for item in user_payload["recommendations"]]
-        except Exception as exc:
+            selected_user_profile = user_payload.profile
+            selected_user_history = user_payload.history
+            selected_user_recommendations = user_payload.recommendations
+        except (FileNotFoundError, KeyError) as exc:
             error = str(exc)
 
     if user_id or parsed_history:
@@ -217,7 +217,7 @@ def index(
             recommendations = service.recommend(user_id=user_id, history_items=parsed_history, top_k=top_k)
             if user_id:
                 history = service.get_user_history(user_id)
-        except Exception as exc:
+        except (FileNotFoundError, KeyError, ValueError) as exc:
             error = str(exc)
     return TEMPLATES.TemplateResponse(
         request=request,

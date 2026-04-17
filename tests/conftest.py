@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 import gzip
 import json
 import shutil
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
@@ -12,6 +15,18 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from amazon_recsys.config.settings import AppSettings
+
+if TYPE_CHECKING:
+    from amazon_recsys.config.container import Container
+    from amazon_recsys.domain.entities import ActiveBundlePointer, BundleManifest
+    from amazon_recsys.ml.pipelines import TrainingSession
+
+
+@dataclass(slots=True)
+class BundleLifecycleResult:
+    session: TrainingSession
+    manifest: BundleManifest
+    pointer: ActiveBundlePointer | None
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -192,3 +207,22 @@ def test_container(test_settings: AppSettings):
     from amazon_recsys.config.container import build_container
 
     return build_container(test_settings)
+
+
+@pytest.fixture
+def train_export_activate() -> Callable[..., BundleLifecycleResult]:
+    def _train_export_activate(
+        container: Container,
+        *,
+        version: str,
+        activate: bool = True,
+    ) -> BundleLifecycleResult:
+        session = container.training_pipeline.run(force_rebuild=True)
+        manifest = container.bundle_export_service.export_bundle(session, version=version)
+        pointer = None
+        if activate:
+            pointer = container.artifact_store.activate_bundle(manifest.version)
+            container.recommendation_service.refresh()
+        return BundleLifecycleResult(session=session, manifest=manifest, pointer=pointer)
+
+    return _train_export_activate
