@@ -14,6 +14,8 @@
 {% set cold_start_key = "cold_start_hit_rate_at_" ~ concept_k %}
 {% set latest_monitoring_index = (monitoring_history | length) - 1 if monitoring_history else 0 %}
 {% set query_context = user_id if user_id else ("history override" if history_items else "no live query") %}
+{% set is_mock_bundle = active_model.source is defined and active_model.source == "mock" %}
+{% set bundle_status_class = "is-warn" if is_mock_bundle else "is-ready" if model_status == "ready" else "is-alert" %}
 
 {% macro histogram_row(label, values, tone_class) -%}
   <div class="histogram-row">
@@ -54,6 +56,10 @@
   {% else %}
     {{ "%.3f"|format(value) }}
   {% endif %}
+{%- endmacro %}
+
+{% macro format_price(value) -%}
+  {{ "R %.2f"|format(value) if value is not none else "n/a" }}
 {%- endmacro %}
 
 {% macro trend_card(card) -%}
@@ -118,7 +124,7 @@
     </div>
   </article>
   <div class="decision-stack">
-    <article class="decision-card"><span class="stat-label">Active Bundle</span><strong class="decision-value">{{ active_model.version or "No active bundle" }}</strong><div class="status-row"><span class="status-pill {% if model_status == 'ready' %}is-ready{% else %}is-alert{% endif %}">{{ model_status | replace("_", " ") }}</span><span class="source-pill">{{ active_model.model_backend if active_model.model_backend is defined else "n/a" }}</span></div></article>
+    <article class="decision-card"><span class="stat-label">Active Bundle</span><strong class="decision-value">{{ active_model.version or "No active bundle" }}</strong><div class="status-row"><span class="status-pill {{ bundle_status_class }}">{{ "mock bundle" if is_mock_bundle else model_status | replace("_", " ") }}</span><span class="source-pill">{{ active_model.model_backend if active_model.model_backend is defined else "n/a" }}</span></div></article>
     <article class="decision-card"><span class="stat-label">Operational Risk</span><strong class="decision-value">{{ drift_status | replace("_", " ") }}</strong><p class="stat-note">{% if drift_features %}Top driver: {{ drift_features[0] | replace("_", " ") }}{% else %}Monitoring summary will appear after the first completed window.{% endif %}</p></article>
     <article class="decision-card"><span class="stat-label">Query Context</span><strong class="decision-value">{{ query_context }}</strong><p class="stat-note">{{ recommendations | length }} ranked items currently in focus.</p></article>
     <article class="decision-card"><span class="stat-label">Monitoring Freshness</span><strong class="decision-value">{{ monitoring_summary.window_end if monitoring_summary.window_end is defined else "n/a" }}</strong><p class="stat-note">{{ monitoring_history | length }} recent monitoring windows loaded into the console.</p></article>
@@ -131,6 +137,24 @@
   <article class="stat-card"><span class="stat-label">Metric Files</span><strong class="stat-value">{{ metric_files | length }}</strong><span class="stat-note">Offline diagnostics packaged in the active bundle.</span></article>
   <article class="stat-card"><span class="stat-label">Retriever Variants</span><strong class="stat-value">{{ active_model.retriever_variants | length if active_model.retriever_variants is defined else 0 }}</strong><span class="stat-note">Candidate generators participating in inference.</span></article>
 </section>
+
+{% if is_mock_bundle %}
+<section class="operational-banner is-warn" aria-live="polite">
+  <div>
+    <strong>Mock bundle is active.</strong>
+    <p>The console is running with placeholder recommendations because no real active bundle is configured for this session.</p>
+  </div>
+  <code>python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate</code>
+</section>
+{% elif model_status != "ready" %}
+<section class="operational-banner is-alert" aria-live="polite">
+  <div>
+    <strong>No active recommendation bundle is ready.</strong>
+    <p>Train, export, and activate a serving bundle before using the QA and monitoring workflows.</p>
+  </div>
+  <code>python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate</code>
+</section>
+{% endif %}
 
 {% if error %}
 <div class="alert-banner">{{ error }}</div>
@@ -272,10 +296,11 @@
 
           {% if recommendations %}
           <div class="table-wrap table-wrap-sticky table-wrap-recommendations">
-            <table class="data-table data-table-recommendations" data-filter-table="qa-results" data-sort-table="qa-results">
+            <table class="data-table data-table-recommendations" data-filter-table="qa-results" data-sort-table="qa-results" data-resizable-table="qa-results" data-default-widths="72,560,190,110,100,220,120">
               <thead>
                 <tr>
-                  <th><button class="sort-button is-active" type="button" data-sort-trigger="qa-results" data-sort-key="title" data-sort-type="text" data-sort-default="true" data-sort-default-direction="asc">Recommended item</button></th>
+                  <th><button class="sort-button is-active" type="button" data-sort-trigger="qa-results" data-sort-key="rank" data-sort-type="number" data-sort-default="true" data-sort-default-direction="asc">Rank</button></th>
+                  <th><button class="sort-button" type="button" data-sort-trigger="qa-results" data-sort-key="title" data-sort-type="text">Recommended item</button></th>
                   <th><button class="sort-button" type="button" data-sort-trigger="qa-results" data-sort-key="category" data-sort-type="text">Category</button></th>
                   <th><button class="sort-button" type="button" data-sort-trigger="qa-results" data-sort-key="price" data-sort-type="number">Price</button></th>
                   <th><button class="sort-button" type="button" data-sort-trigger="qa-results" data-sort-key="rating" data-sort-type="number">Rating</button></th>
@@ -285,7 +310,8 @@
               </thead>
               <tbody>
                 {% for item in recommendations %}
-                <tr data-table-row="qa-results" data-search="{{ (item.title ~ ' ' ~ item.item_id) | lower }}" data-category="{{ item.source_category | lower }}" data-sources="{{ (item.candidate_sources or '') | lower }}" data-title="{{ item.title | lower }}" data-price="{{ item.price if item.price is not none else -1 }}" data-rating="{{ item.average_rating if item.average_rating is not none else -1 }}" data-score="{{ item.score if item.score is not none else -999999 }}">
+                <tr data-table-row="qa-results" data-search="{{ (item.title ~ ' ' ~ item.item_id) | lower }}" data-rank="{{ loop.index }}" data-category="{{ item.source_category | lower }}" data-sources="{{ (item.candidate_sources or '') | lower }}" data-title="{{ item.title | lower }}" data-price="{{ item.price if item.price is not none else -1 }}" data-rating="{{ item.average_rating if item.average_rating is not none else -1 }}" data-score="{{ item.score if item.score is not none else -999999 }}">
+                  <td class="numeric-column"><span class="rank-chip">{{ loop.index }}</span></td>
                   <td class="item-cell">
                     <span class="item-title">{{ item.title }}</span>
                     <span class="item-meta">{{ item.item_id }}</span>
@@ -294,13 +320,13 @@
                       <div class="row-details-body">
                         <div class="snapshot-line">Retrieval score <span>{{ "%.3f"|format(item.retrieval_score) if item.retrieval_score is not none else "n/a" }}</span></div>
                         <div class="snapshot-line">Rank score <span>{{ "%.3f"|format(item.score) if item.score is not none else "n/a" }}</span></div>
-                        <div class="snapshot-line">Price <span>{{ "$%.2f"|format(item.price) if item.price is not none else "n/a" }}</span></div>
+                        <div class="snapshot-line">Price <span>{{ format_price(item.price) }}</span></div>
                         <div class="snapshot-line">Average rating <span>{{ "%.1f"|format(item.average_rating) if item.average_rating is not none else "n/a" }}</span></div>
                       </div>
                     </details>
                   </td>
                   <td><span class="data-pill">{{ item.source_category | replace("_", " ") }}</span></td>
-                  <td class="numeric-column">{{ "$%.2f"|format(item.price) if item.price is not none else "n/a" }}</td>
+                  <td class="numeric-column">{{ format_price(item.price) }}</td>
                   <td class="numeric-column">{{ "%.1f"|format(item.average_rating) if item.average_rating is not none else "n/a" }}</td>
                   <td class="source-cell">{{ item.candidate_sources or "n/a" }}</td>
                   <td class="numeric-column"><span class="score-chip">{{ "%.3f"|format(item.score) if item.score is not none else "n/a" }}</span></td>
@@ -324,7 +350,7 @@
             <div class="mini-metric"><span>Selected analysis user</span><strong>{{ selected_user_id or user_id }}</strong></div>
           </div>
           <div class="table-wrap table-wrap-sticky table-wrap-history">
-            <table class="data-table data-table-history">
+            <table class="data-table data-table-history" data-resizable-table="qa-history" data-default-widths="150,720,110">
               <thead><tr><th>Ordered</th><th>Item</th><th>Rating</th></tr></thead>
               <tbody>
                 {% for item in history[:10] %}
@@ -368,7 +394,7 @@
         </div>
 
         <div class="table-wrap table-wrap-sticky table-wrap-users">
-          <table class="data-table data-table-users" data-filter-table="analysis-users" data-sort-table="analysis-users">
+          <table class="data-table data-table-users" data-filter-table="analysis-users" data-sort-table="analysis-users" data-resizable-table="analysis-users" data-default-widths="380,150,130,180">
             <thead>
               <tr>
                 <th><button class="sort-button is-active" type="button" data-sort-trigger="analysis-users" data-sort-key="user" data-sort-type="text" data-sort-default="true" data-sort-default-direction="asc">User</button></th>
@@ -436,7 +462,7 @@
             <div class="panel-head"><div><p class="section-kicker">Recommendation Preview</p><h2>What the bundle would serve next</h2></div></div>
             {% if selected_user_recommendations %}
             <div class="table-wrap table-wrap-sticky table-wrap-analysis">
-              <table class="data-table">
+              <table class="data-table" data-resizable-table="selected-user-preview" data-default-widths="560,180,120">
                 <thead><tr><th>Item</th><th>Source</th><th>Score</th></tr></thead>
                 <tbody>
                   {% for item in selected_user_recommendations %}
@@ -560,7 +586,7 @@
           </div>
 
           <div class="table-wrap table-wrap-sticky table-wrap-monitoring">
-            <table class="data-table data-table-monitoring" data-filter-table="feature-drifts-{{ window_index }}" data-sort-table="feature-drifts-{{ window_index }}">
+            <table class="data-table data-table-monitoring" data-filter-table="feature-drifts-{{ window_index }}" data-sort-table="feature-drifts-{{ window_index }}" data-resizable-table="feature-drifts-{{ window_index }}" data-default-widths="240,120,120,130,120,280,280">
               <thead>
                 <tr>
                   <th><button class="sort-button is-active" type="button" data-sort-trigger="feature-drifts-{{ window_index }}" data-sort-key="feature" data-sort-type="text" data-sort-default="true" data-sort-default-direction="asc">Feature</button></th>

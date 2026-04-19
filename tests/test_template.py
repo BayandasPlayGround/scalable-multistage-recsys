@@ -17,6 +17,10 @@ def test_template_creation_is_idempotent(workspace_dir: Path) -> None:
     assert created
     assert (target_root / "pyproject.toml").exists()
     assert (target_root / "src" / "amazon_recsys" / "api" / "app.py").exists()
+    assert (target_root / "src" / "amazon_recsys" / "web" / "templates" / "dashboard.html").exists()
+    assert (target_root / "src" / "amazon_recsys" / "web" / "static" / "app.js").exists()
+    assert (target_root / "src" / "amazon_recsys" / "web" / "static" / "favicon.svg").exists()
+    assert not (target_root / "src" / "amazon_recsys" / "web" / "templates" / "index.html").exists()
 
     readme_path = target_root / "README.md"
     readme_path.write_text("keep-me", encoding="utf-8")

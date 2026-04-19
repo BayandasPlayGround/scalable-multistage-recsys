@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "Amazon RecSys Platform" }}</title>
-    {% set static_version = "2026-04-16-ux-elevation-3" %}
+    {% set static_version = "2026-04-19-ux-elevation-4" %}
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='/favicon.svg') }}?v={{ static_version }}" />
     <link rel="shortcut icon" href="{{ url_for('static', path='/favicon.svg') }}?v={{ static_version }}" />
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ static_version }}" />
@@ -27,7 +27,7 @@
         </div>
 
         <nav class="sidebar-nav" aria-label="Workspace">
-          <a class="nav-item" href="#overview-workspace" data-tab-link="overview-workspace" data-tab-group-name="workspace" data-tab-section="workspace-modes"><span class="nav-dot"></span><span>Overview</span></a>
+          <a class="nav-item is-active" href="#overview-workspace" data-tab-link="overview-workspace" data-tab-group-name="workspace" data-tab-section="workspace-modes" aria-current="page"><span class="nav-dot"></span><span>Overview</span></a>
           <a class="nav-item" href="#qa-workspace" data-tab-link="qa-workspace" data-tab-group-name="workspace" data-tab-section="workspace-modes"><span class="nav-dot"></span><span>Recommendation QA</span></a>
           <a class="nav-item" href="#analysis-workspace" data-tab-link="analysis-workspace" data-tab-group-name="workspace" data-tab-section="workspace-modes"><span class="nav-dot"></span><span>User Analysis</span></a>
           <a class="nav-item" href="#monitoring-workspace" data-tab-link="monitoring-workspace" data-tab-group-name="workspace" data-tab-section="workspace-modes"><span class="nav-dot"></span><span>Operational Monitoring</span></a>
