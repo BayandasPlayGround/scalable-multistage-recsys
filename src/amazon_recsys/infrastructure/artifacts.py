@@ -6,7 +6,14 @@ from pathlib import Path
 
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import ActiveBundlePointer, BundleManifest, RuntimeBundle, utcnow_iso
-from amazon_recsys.ml.bundles import build_bundle_manifest, build_runtime_bundle, generate_bundle_version
+from amazon_recsys.ml.bundles import (
+    ONNX_BUNDLE_FORMAT,
+    build_bundle_manifest,
+    build_runtime_bundle,
+    generate_bundle_version,
+    load_runtime_bundle,
+    save_runtime_bundle,
+)
 from amazon_recsys.ml.legacy import load_legacy_pipeline
 from amazon_recsys.ml.pipelines import TrainingSession
 
@@ -46,11 +53,8 @@ class LocalArtifactStore:
         bundle_dir.mkdir(parents=True, exist_ok=True)
         manifest = build_bundle_manifest(self.settings, session, bundle_version, bundle_dir)
         runtime_bundle = build_runtime_bundle(session, manifest)
-        with open(manifest.runtime_bundle_file, "wb") as handle:
-            pickle.dump(runtime_bundle, handle)
+        save_runtime_bundle(runtime_bundle)
         self.write_manifest(manifest)
-        if manifest.evaluation_summary_path is not None:
-            self._write_json(Path(manifest.evaluation_summary_path), runtime_bundle.evaluation_summary.to_dict())
         return manifest
 
     def activate_bundle(self, version: str) -> ActiveBundlePointer:
@@ -91,7 +95,12 @@ class LocalArtifactStore:
         return BundleManifest.from_dict(self._read_json(manifest_path))
 
     def load_bundle(self, manifest: BundleManifest) -> RuntimeBundle:
-        # Import both module paths so bundles created before and after the migration unpickle cleanly.
+        if manifest.bundle_format == ONNX_BUNDLE_FORMAT:
+            return load_runtime_bundle(manifest)
+        if manifest.bundle_format != "pickle":
+            raise ValueError(f"Unsupported bundle format: {manifest.bundle_format!r}")
+
+        # Import both module paths so legacy pickle bundles created before the migration unpickle cleanly.
         load_legacy_pipeline()
         with open(manifest.runtime_bundle_file, "rb") as handle:
             return pickle.load(handle)

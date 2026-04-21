@@ -8,7 +8,7 @@ Amazon RecSys is a package-owned multi-stage recommender built on Amazon review 
 
 - trains a hybrid recommender with popularity, cooccurrence, latent CF, content-based retrieval, and an optional two-tower retriever
 - ranks candidate sets with XGBoost by default, with `dlrm` kept as an experimental backend
-- exports and activates versioned serving bundles for online inference
+- exports and activates versioned ONNX-backed serving bundles for online inference
 - serves recommendation, history, model, evaluation, and monitoring endpoints through FastAPI plus a Jinja UI
 - logs training and monitoring runs to MLflow when enabled
 - computes batch feature drift and concept drift from served inference logs and delayed outcomes
@@ -38,7 +38,7 @@ python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-prof
 In practice, this system would usually sit behind a web or mobile product as an online recommendation service. A common Azure shape is:
 
 - train and export a bundle from CI, Azure ML, or a scheduled batch job
-- store the exported bundle under durable storage and activate the current version
+- store the exported ONNX bundle under durable storage and activate the current version
 - deploy the FastAPI service to Azure App Service, Azure Container Apps, or AKS
 - expose `/recommend` or a product-specific endpoint behind Azure Front Door or API Management
 - let the website, app, or backend call that endpoint whenever a user lands on a page, opens the app, views a product, or refreshes a personalized feed

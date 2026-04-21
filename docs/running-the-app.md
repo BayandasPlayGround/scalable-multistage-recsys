@@ -81,6 +81,8 @@ Outputs land under:
 - `artifacts/amazon_recsys/bundles/`
 - `artifacts/production/active_bundle.json`
 
+New bundle versions are portable ONNX bundle directories. The deployable ranker lives at `models/ranker.onnx`, while `runtime_bundle.json` points to the JSON, Parquet, NumPy, and Annoy artifacts needed by retrieval, serving, monitoring, and evaluation summary views.
+
 If you want training without bundle export:
 
 ```powershell

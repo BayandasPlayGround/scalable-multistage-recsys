@@ -42,11 +42,15 @@ def test_training_run_and_bundle_export_are_logged_to_mlflow(test_settings, trai
         client = MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
         run = client.get_run(bundle.session.mlflow_run_id)
         root_artifacts = {item.path for item in client.list_artifacts(bundle.session.mlflow_run_id)}
+        bundle_artifacts = {item.path for item in client.list_artifacts(bundle.session.mlflow_run_id, "bundle")}
+        model_artifacts = {item.path for item in client.list_artifacts(bundle.session.mlflow_run_id, "bundle/models")}
 
         assert run.data.tags["phase"] == "train"
         assert run.data.tags["bundle.version"] == "mlflow-fixture"
         assert run.data.params["training.run_name"] == "pytest"
         assert run.data.metrics["dataset.interactions"] > 0
         assert {"bundle", "evaluation", "training"}.issubset(root_artifacts)
+        assert "bundle/runtime_bundle.json" in bundle_artifacts
+        assert "bundle/models/ranker.onnx" in model_artifacts
     finally:
         shutil.rmtree(tracking_dir, ignore_errors=True)

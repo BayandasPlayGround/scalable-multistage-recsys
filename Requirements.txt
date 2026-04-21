@@ -4,6 +4,9 @@ httpx
 jinja2
 nbformat
 numpy
+onnx
+onnxmltools
+onnxruntime
 pandas
 pyarrow
 pydantic-settings

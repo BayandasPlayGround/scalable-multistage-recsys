@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -23,9 +24,14 @@ def test_training_bundle_round_trip(test_container, train_export_activate) -> No
     available_users = test_container.recommendation_service.list_available_users(limit=10, min_history=3)
     model = test_container.recommendation_service.get_active_model()
     summary = test_container.recommendation_service.get_evaluation_summary()
+    bundle_dir = Path(bundle.manifest.bundle_dir)
 
     assert bundle.pointer is not None
     assert bundle.pointer.version == "fixture-bundle"
+    assert bundle.manifest.bundle_format == "onnx"
+    assert Path(bundle.manifest.runtime_bundle_path).name == "runtime_bundle.json"
+    assert (bundle_dir / "models" / "ranker.onnx").exists()
+    assert not list(bundle_dir.rglob("*.pkl"))
     assert bundle.session.pipeline_config.__class__.__module__ == "amazon_recsys.ml.core"
     assert bundle.session.prepared.__class__.__module__ == "amazon_recsys.ml.core"
     assert 1 <= len(recommendations) <= 3

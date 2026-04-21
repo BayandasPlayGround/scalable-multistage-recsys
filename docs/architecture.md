@@ -36,13 +36,14 @@ Ranking:
 - default backend: `xgboost`
 - experimental backend: `dlrm`
 
-Training outputs are written into run-scoped artifacts and can be packaged into versioned serving bundles.
+Training outputs are written into run-scoped artifacts and can be packaged into versioned ONNX-backed serving bundles.
+The ranker is exported to `models/ranker.onnx`; retrieval state, catalog data, split state, and evaluation metadata remain as portable JSON, Parquet, NumPy, and Annoy artifacts beside the model.
 
 ## Serving
 
 Serving is bundle-backed.
 
-- `python -m amazon_recsys.cli.main export-bundle ... --activate` trains, exports, and activates a bundle
+- `python -m amazon_recsys.cli.main export-bundle ... --activate` trains, exports, and activates an ONNX bundle
 - `python -m amazon_recsys.cli.main serve` starts the FastAPI app and Jinja UI
 - `src/amazon_recsys/application/services.py` loads the active bundle and refreshes when activation changes
 

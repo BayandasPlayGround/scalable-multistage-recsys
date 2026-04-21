@@ -214,7 +214,7 @@ Inside a run, check:
 - `Artifacts`
   - `training/`
   - `evaluation/`
-  - `bundle/`
+  - `bundle/`, including `runtime_bundle.json` and `models/ranker.onnx`
 - `Tags`
   - phase, backend, retriever variants, bundle version
 

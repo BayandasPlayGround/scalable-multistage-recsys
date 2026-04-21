@@ -42,6 +42,7 @@ class BundleManifest:
     run_name: str
     run_profile: str
     model_backend: str
+    bundle_format: str = "pickle"
     retriever_variants: list[str] = field(default_factory=list)
     notes: dict[str, JSONValue] = field(default_factory=dict)
 
