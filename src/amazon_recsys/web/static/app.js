@@ -7,8 +7,87 @@
   const tabLinkSelector = "[data-tab-link]";
   const navItemSelector = ".nav-item[data-tab-link]";
   const tabPanelSelector = "[data-tab-panel]";
+  const themeToggleSelector = "[data-theme-toggle]";
   const tabStatePrefix = "amazon-recsys-tab:";
   const tableResizeStoragePrefix = "amazon-recsys-column-widths:";
+  const themeStorageKey = "amazon-recsys-theme";
+  const themeMediaQuery = window.matchMedia?.("(prefers-color-scheme: dark)");
+
+  function readStoredTheme() {
+    try {
+      const storedTheme = window.localStorage.getItem(themeStorageKey);
+      return storedTheme === "light" || storedTheme === "dark" ? storedTheme : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function writeStoredTheme(theme) {
+    try {
+      window.localStorage.setItem(themeStorageKey, theme);
+    } catch (error) {
+      // Keep the selected theme for this page view when storage is unavailable.
+    }
+  }
+
+  function getSystemTheme() {
+    return themeMediaQuery?.matches ? "dark" : "light";
+  }
+
+  function getActiveTheme() {
+    const documentTheme = document.documentElement.dataset.theme;
+    if (documentTheme === "light" || documentTheme === "dark") {
+      return documentTheme;
+    }
+    return readStoredTheme() || getSystemTheme();
+  }
+
+  function updateThemeToggle(activeTheme, isManualPreference) {
+    const toggle = document.querySelector(themeToggleSelector);
+    if (!toggle) {
+      return;
+    }
+
+    const nextTheme = activeTheme === "dark" ? "light" : "dark";
+    const label = toggle.querySelector("[data-theme-toggle-label]");
+    const note = toggle.querySelector("[data-theme-toggle-note]");
+    const actionLabel = `Switch to ${nextTheme} mode`;
+
+    toggle.dataset.activeTheme = activeTheme;
+    toggle.setAttribute("aria-label", actionLabel);
+    toggle.setAttribute("title", actionLabel);
+    toggle.setAttribute("aria-pressed", String(activeTheme === "dark"));
+    if (label) {
+      label.textContent = activeTheme === "dark" ? "Dark mode" : "Light mode";
+    }
+    if (note) {
+      note.textContent = isManualPreference ? "Saved preference" : "Follows system";
+    }
+  }
+
+  function applyTheme(theme, { persist = false } = {}) {
+    const nextTheme = theme === "dark" ? "dark" : "light";
+    document.documentElement.dataset.theme = nextTheme;
+    if (persist) {
+      writeStoredTheme(nextTheme);
+    }
+    updateThemeToggle(nextTheme, persist || Boolean(readStoredTheme()));
+  }
+
+  function initialiseTheme() {
+    applyTheme(readStoredTheme() || getSystemTheme());
+
+    const syncSystemTheme = () => {
+      if (!readStoredTheme()) {
+        applyTheme(getSystemTheme());
+      }
+    };
+    if (themeMediaQuery?.addEventListener) {
+      themeMediaQuery.addEventListener("change", syncSystemTheme);
+    } else if (themeMediaQuery?.addListener) {
+      themeMediaQuery.addListener(syncSystemTheme);
+    }
+  }
 
   function formatLabel(value) {
     return value
@@ -592,6 +671,14 @@
   }
 
   document.addEventListener("click", (event) => {
+    const themeToggle = event.target.closest(themeToggleSelector);
+    if (themeToggle) {
+      event.preventDefault();
+      const nextTheme = getActiveTheme() === "dark" ? "light" : "dark";
+      applyTheme(nextTheme, { persist: true });
+      return;
+    }
+
     const tabButton = event.target.closest(tabButtonSelector);
     if (tabButton) {
       event.preventDefault();
@@ -691,6 +778,7 @@
     );
   });
 
+  initialiseTheme();
   initialiseTableFilters(document);
   initialiseSortableTables(document);
   initialiseResizableTables(document);
