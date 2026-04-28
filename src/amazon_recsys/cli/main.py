@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 import uvicorn
@@ -10,6 +11,9 @@ from amazon_recsys.api.app import create_app
 from amazon_recsys.bootstrap import build_container
 from amazon_recsys.domain.entities import EvaluationSummary
 from amazon_recsys.config.settings import AppSettings, get_settings
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,17 +97,28 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "export-bundle":
+        LOGGER.info(
+            "CLI export-bundle requested: run_name=%s run_profile=%s version=%s activate=%s",
+            settings.run_name,
+            settings.run_profile,
+            args.version or "<auto>",
+            args.activate,
+        )
         session = container.training_pipeline.run(force_rebuild=args.force_rebuild)
         manifest = container.bundle_export_service.export_bundle(session, version=args.version)
         if args.activate:
+            LOGGER.info("Activating exported bundle: version=%s", manifest.version)
             container.artifact_store.activate_bundle(manifest.version)
             container.recommendation_service.refresh()
+            LOGGER.info("Bundle activation complete: version=%s", manifest.version)
         print(json.dumps(manifest.to_dict(), indent=2))
         return 0
 
     if args.command == "activate-bundle":
+        LOGGER.info("Activating bundle: version=%s", args.version)
         pointer = container.artifact_store.activate_bundle(args.version)
         container.recommendation_service.refresh()
+        LOGGER.info("Bundle activation complete: version=%s", args.version)
         print(json.dumps(pointer.to_dict(), indent=2))
         return 0
 

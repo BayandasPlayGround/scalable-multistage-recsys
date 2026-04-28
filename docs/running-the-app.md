@@ -173,6 +173,12 @@ The practical controls are:
 
 Important implementation detail: the internal pipeline has a `max_rows_per_category` field. Today it is controlled by run profile defaults and is not exposed directly as an `AMAZON_RECSYS_*` environment variable. Use `debug` for the built-in 100k-per-category cap, or use `dev_mode` plus `dev_fraction` to sample smaller volumes.
 
+Training commands emit stage-level `INFO` logs by default, including corpus preparation, split creation, retriever training, ranker training, bundle export, and activation. For row-level and chunk-level progress bars during long local runs, also enable:
+
+```powershell
+$env:AMAZON_RECSYS_SHOW_PROGRESS="true"
+```
+
 Small single-category experiment:
 
 ```powershell

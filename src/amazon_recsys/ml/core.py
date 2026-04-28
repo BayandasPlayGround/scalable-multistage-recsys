@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import pickle
 import random
@@ -33,6 +34,9 @@ except ModuleNotFoundError:
 
 # Legacy notebook compatibility alias. The package no longer imports TFRS directly.
 tfrs = None
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 Record: TypeAlias = dict[str, object]
@@ -748,7 +752,15 @@ def _extract_review_signals(config: PipelineConfig, force: bool = False) -> tupl
         _safe_rmtree(hard_negative_dir, config.base_dir)
         raw_stats_path.unlink(missing_ok=True)
     if positive_dir.exists() and hard_negative_dir.exists() and raw_stats_path.exists():
+        LOGGER.info("Using cached review signal chunks: %s", config.cache_dir)
         return pd.read_csv(raw_stats_path), positive_dir, hard_negative_dir
+    LOGGER.info(
+        "Extracting review signals: categories=%s max_rows_per_category=%s dev_mode=%s dev_fraction=%s",
+        ",".join(config.categories),
+        config.max_rows_per_category,
+        config.dev_mode,
+        config.dev_fraction,
+    )
     positive_dir.mkdir(parents=True, exist_ok=True)
     hard_negative_dir.mkdir(parents=True, exist_ok=True)
     stats_rows: list[Record] = []
@@ -758,6 +770,7 @@ def _extract_review_signals(config: PipelineConfig, force: bool = False) -> tupl
         source_path = config.data_dir / REVIEW_FILE_NAMES[category]
         if not source_path.exists():
             raise FileNotFoundError(f"Review file not found: {source_path}")
+        LOGGER.info("Extracting review signals for category=%s source=%s", category, source_path)
         base_keep_fraction = float(category_keep_fractions.get(category, config.dev_fraction))
         positive_records: list[Record] = []
         negative_records: list[Record] = []
@@ -829,6 +842,15 @@ def _extract_review_signals(config: PipelineConfig, force: bool = False) -> tupl
             _flush_records_to_parquet(positive_records, positive_dir / f"{category}_part_{part_positive:04d}.parquet")
         if negative_records:
             _flush_records_to_parquet(negative_records, hard_negative_dir / f"{category}_part_{part_negative:04d}.parquet")
+        LOGGER.info(
+            "Category extraction complete: category=%s raw_rows=%s kept_rows=%s positives=%s hard_negatives=%s keep_rate=%.3f",
+            category,
+            f"{raw_rows_seen:,}",
+            f"{kept_rows:,}",
+            f"{int(sum(count for value, count in rating_counter.items() if value >= 4.0)):,}",
+            f"{int(sum(count for value, count in rating_counter.items() if value <= 2.0)):,}",
+            kept_rows / max(raw_rows_seen, 1),
+        )
         stats_rows.append(
             {
                 "source_category": category,
@@ -854,6 +876,7 @@ def _extract_review_signals(config: PipelineConfig, force: bool = False) -> tupl
         )
     raw_stats = pd.DataFrame(stats_rows)
     raw_stats.to_csv(raw_stats_path, index=False)
+    LOGGER.info("Review signal extraction complete: stats_path=%s", raw_stats_path)
     return raw_stats, positive_dir, hard_negative_dir
 
 
@@ -892,10 +915,16 @@ def _compute_k_core_sets(config: PipelineConfig, positive_dir: Path, force: bool
         stats = pd.read_csv(kcore_stats_path)
         valid_users = set(pd.read_parquet(valid_users_path)["user_id"].astype(str))
         valid_items = set(pd.read_parquet(valid_items_path)["parent_asin"].astype(str))
+        LOGGER.info(
+            "Using cached k-core sets: users=%s items=%s",
+            f"{len(valid_users):,}",
+            f"{len(valid_items):,}",
+        )
         return stats, valid_users, valid_items
     positive_chunks = sorted(positive_dir.glob("*.parquet"))
     if not positive_chunks:
         raise FileNotFoundError(f"No positive chunks found under {positive_dir}")
+    LOGGER.info("Computing k-core sets: k_core=%s positive_chunks=%s", config.k_core, len(positive_chunks))
     iteration_rows: list[Record] = []
     valid_users: set[str] | None = None
     valid_items: set[str] | None = None
@@ -911,6 +940,13 @@ def _compute_k_core_sets(config: PipelineConfig, positive_dir: Path, force: bool
         next_valid_users = {user for user, count in user_counts.items() if count >= config.k_core}
         next_valid_items = {item for item, count in item_counts.items() if count >= config.k_core}
         iteration_bar.set_postfix(rows=kept_rows, users=len(next_valid_users), items=len(next_valid_items))
+        LOGGER.info(
+            "k-core pass %s: rows=%s users=%s items=%s",
+            iteration,
+            f"{kept_rows:,}",
+            f"{len(next_valid_users):,}",
+            f"{len(next_valid_items):,}",
+        )
         iteration_rows.append(
             {
                 "iteration": iteration,
@@ -930,6 +966,7 @@ def _compute_k_core_sets(config: PipelineConfig, positive_dir: Path, force: bool
     pd.DataFrame(iteration_rows).to_csv(kcore_stats_path, index=False)
     pd.DataFrame({"user_id": sorted(valid_users)}).to_parquet(valid_users_path, index=False)
     pd.DataFrame({"parent_asin": sorted(valid_items)}).to_parquet(valid_items_path, index=False)
+    LOGGER.info("k-core complete: users=%s items=%s", f"{len(valid_users):,}", f"{len(valid_items):,}")
     return pd.DataFrame(iteration_rows), valid_users, valid_items
 
 
@@ -954,6 +991,7 @@ def _load_filtered_interactions(
     ]
     positive_frames: list[pd.DataFrame] = []
     positive_paths = sorted(positive_dir.glob("*.parquet"))
+    LOGGER.info("Loading filtered positive chunks: chunks=%s", len(positive_paths))
     for path in _progress(positive_paths, total=len(positive_paths), desc="Load positive chunks", unit="chunk", disable=not show_progress):
         df = pd.read_parquet(path)
         df = df[df["user_id"].isin(valid_users) & df["parent_asin"].isin(valid_items)]
@@ -961,6 +999,7 @@ def _load_filtered_interactions(
             positive_frames.append(df)
     hard_negative_frames: list[pd.DataFrame] = []
     hard_negative_paths = sorted(hard_negative_dir.glob("*.parquet"))
+    LOGGER.info("Loading filtered hard-negative chunks: chunks=%s", len(hard_negative_paths))
     for path in _progress(hard_negative_paths, total=len(hard_negative_paths), desc="Load hard-negative chunks", unit="chunk", disable=not show_progress):
         df = pd.read_parquet(path)
         df = df[df["user_id"].isin(valid_users)]
@@ -971,12 +1010,23 @@ def _load_filtered_interactions(
     for frame in [positive_df, hard_negative_df]:
         if not frame.empty:
             frame["timestamp_dt"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True, errors="coerce")
+    LOGGER.info(
+        "Filtered interaction loading complete: positives=%s hard_negatives=%s",
+        f"{len(positive_df):,}",
+        f"{len(hard_negative_df):,}",
+    )
     return positive_df, hard_negative_df
 
 
 def _fit_text_features(config: PipelineConfig, item_table: pd.DataFrame) -> tuple[TfidfVectorizer, TruncatedSVD, np.ndarray]:
     texts = item_table["item_text"].fillna("").tolist()
     vectorizer = TfidfVectorizer(max_features=config.text_max_features, ngram_range=(1, 2), min_df=2)
+    LOGGER.info(
+        "Fitting text features: items=%s max_features=%s svd_dim=%s",
+        f"{len(item_table):,}",
+        config.text_max_features,
+        config.text_svd_dim,
+    )
     try:
         tfidf = vectorizer.fit_transform(texts)
     except ValueError:
@@ -992,6 +1042,7 @@ def _fit_text_features(config: PipelineConfig, item_table: pd.DataFrame) -> tupl
     reduced = svd.fit_transform(tfidf)
     if reduced.shape[1] < config.text_svd_dim:
         reduced = np.pad(reduced, ((0, 0), (0, config.text_svd_dim - reduced.shape[1])))
+    LOGGER.info("Text feature fitting complete: tfidf_terms=%s output_shape=%s", tfidf.shape[1], reduced.shape)
     return vectorizer, svd, reduced.astype(np.float32)
 
 
@@ -1085,7 +1136,7 @@ def prepare_corpus(
     set_global_seed(config.seed)
     if not force_rebuild and _should_force_rebuild_for_config(config):
         force_rebuild = True
-        print("Config change detected for cached corpus artifacts. Rebuilding cache for the current notebook settings.")
+        LOGGER.info("Config change detected for cached corpus artifacts. Rebuilding cache for the current settings.")
     raw_stats, positive_dir, hard_negative_dir = _extract_review_signals(config, force=force_rebuild)
     kcore_stats, valid_users, valid_items = _compute_k_core_sets(config, positive_dir, force=force_rebuild)
     interactions_path = config.cache_dir / "filtered_positive_interactions.parquet"
@@ -1096,6 +1147,7 @@ def prepare_corpus(
     svd_path = config.cache_dir / "text_svd.pkl"
     built_in_memory = False
     if force_rebuild or not all(path.exists() for path in [interactions_path, hard_negatives_path, item_features_path, item_text_path, vectorizer_path, svd_path]):
+        LOGGER.info("Building prepared corpus artifacts from chunks")
         interactions, hard_negatives = _load_filtered_interactions(
             positive_dir,
             hard_negative_dir,
@@ -1104,6 +1156,7 @@ def prepare_corpus(
             show_progress=config.show_progress,
         )
         metadata_parent_asins = set(valid_items).union(set(hard_negatives["parent_asin"].astype(str).unique()))
+        LOGGER.info("Loading metadata for %s candidate items", f"{len(metadata_parent_asins):,}")
         metadata = load_metadata(
             config,
             categories=config.categories,
@@ -1131,6 +1184,7 @@ def prepare_corpus(
         del metadata
         gc.collect()
     if not built_in_memory:
+        LOGGER.info("Loading prepared corpus artifacts from cache: %s", config.cache_dir)
         interactions = pd.read_parquet(interactions_path)
         hard_negatives = pd.read_parquet(hard_negatives_path)
         item_features = pd.read_parquet(item_features_path)
@@ -1145,6 +1199,13 @@ def prepare_corpus(
     item_idx_to_id = dict(zip(item_features["item_idx"], item_features["parent_asin"]))
     category_to_idx = dict(zip(item_features["source_category"], item_features["source_category_idx"]))
     save_config(config)
+    LOGGER.info(
+        "Prepared corpus ready: interactions=%s hard_negatives=%s items=%s cache_dir=%s",
+        f"{len(interactions):,}",
+        f"{len(hard_negatives):,}",
+        f"{len(item_features):,}",
+        config.cache_dir,
+    )
     return PreparedArtifacts(
         config=config,
         raw_review_stats=raw_stats,
@@ -1223,6 +1284,7 @@ def _compute_prefix_features(
 def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
     config = prepared.config
     set_global_seed(config.seed)
+    LOGGER.info("Building chronological train/validation/test splits")
     item_to_category = dict(zip(prepared.item_features["item_idx"], prepared.item_features["source_category"]))
     interactions = prepared.interactions.copy()
     interactions["item_idx"] = interactions["parent_asin"].map(prepared.item_id_to_idx).astype(np.int32)
@@ -1299,6 +1361,13 @@ def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
             "Increase dev_fraction or max_rows_per_category, or lower k_core if you are using a very small dev sample."
         )
     train_examples = _sample_training_examples(train_examples, cap=config.train_positive_cap, seed=config.seed)
+    LOGGER.info(
+        "Split examples built: train=%s val=%s test=%s train_positive_cap=%s",
+        f"{len(train_examples):,}",
+        f"{len(val_examples):,}",
+        f"{len(test_examples):,}",
+        config.train_positive_cap,
+    )
     unique_users = pd.Index(pd.concat([train_examples["user_id"], val_examples["user_id"], test_examples["user_id"]]).astype(str).unique())
     user_id_to_idx = {user_id: idx + 1 for idx, user_id in enumerate(unique_users)}
     user_idx_to_id = {idx: user_id for user_id, idx in user_id_to_idx.items()}
@@ -1306,6 +1375,11 @@ def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
         frame["user_idx"] = frame["user_id"].map(user_id_to_idx).astype(np.int32)
     train_sequences = pd.concat(user_sequence_frames, ignore_index=True)
     train_sequences = train_sequences.sort_values(["user_id", "timestamp"]).reset_index(drop=True)
+    LOGGER.info(
+        "Split state ready: users=%s train_sequence_rows=%s",
+        f"{len(user_id_to_idx):,}",
+        f"{len(train_sequences):,}",
+    )
     train_seen_map: dict[str, set[int]] = {}
     val_seen_map: dict[str, set[int]] = {}
     test_seen_map: dict[str, set[int]] = {}
@@ -2627,12 +2701,18 @@ def train_retriever(
 
 def train_retrievers(prepared: PreparedArtifacts, split_artifacts: SplitArtifacts) -> dict[str, RetrieverArtifacts]:
     retrievers: dict[str, RetrieverArtifacts] = {}
+    LOGGER.info("Training content-based retriever")
     retrievers["content_based"] = train_content_retriever(prepared, split_artifacts)
+    LOGGER.info("Content-based retriever complete")
+    LOGGER.info("Training latent collaborative-filtering retriever")
     retrievers["latent_cf"] = train_latent_cf_retriever(prepared, split_artifacts)
+    LOGGER.info("Latent collaborative-filtering retriever complete")
     if prepared.config.enable_neural_retriever:
+        LOGGER.info("Training neural two-tower retriever")
         retrievers["two_tower"] = train_retriever(prepared, split_artifacts, variant="two_tower")
+        LOGGER.info("Neural two-tower retriever complete")
     else:
-        print("Skipping two_tower retriever for this run because CONFIG.enable_neural_retriever is False.")
+        LOGGER.info("Skipping two_tower retriever because enable_neural_retriever is false")
     return retrievers
 
 
@@ -3420,6 +3500,7 @@ def evaluate_ranker(
         eval_cap = prepared.config.ranker_val_example_cap if prepared.config.ranker_val_example_cap is not None else prepared.config.eval_user_cap
         if eval_cap is not None and len(eval_examples) > eval_cap:
             eval_examples = eval_examples.sample(n=eval_cap, random_state=prepared.config.seed).sort_values("example_id")
+        LOGGER.info("Evaluating ranker on %s split: examples=%s", split_name, f"{len(eval_examples):,}")
         candidate_frame = _ranker_candidates_for_examples(
             prepared,
             split_artifacts,
@@ -3466,6 +3547,14 @@ def train_ranker(
     val_cap = config.ranker_val_example_cap if config.ranker_val_example_cap is not None else config.eval_user_cap
     if val_cap is not None and len(val_examples) > val_cap:
         val_examples = val_examples.sample(n=val_cap, random_state=config.seed).sort_values("example_id")
+    LOGGER.info(
+        "Preparing ranker candidates: backend=%s train_examples=%s val_examples=%s candidate_top_k=%s negatives_per_positive=%s",
+        backend,
+        f"{len(train_examples):,}",
+        f"{len(val_examples):,}",
+        config.ranker_candidate_top_k,
+        config.ranker_negatives_per_positive,
+    )
     train_candidates = _ranker_candidates_for_examples(
         prepared,
         split_artifacts,
@@ -3482,6 +3571,11 @@ def train_ranker(
     )
     train_candidates = _rebalance_ranker_candidates(train_candidates, config.ranker_negatives_per_positive, config.seed)
     val_candidates = _rebalance_ranker_candidates(val_candidates, config.ranker_negatives_per_positive, config.seed)
+    LOGGER.info(
+        "Ranker candidate tables ready: train_candidates=%s val_candidates=%s",
+        f"{len(train_candidates):,}",
+        f"{len(val_candidates):,}",
+    )
     if backend == "xgboost":
         if xgb is None:
             raise ImportError("xgboost is required for backend='xgboost' but is not installed.")
@@ -3500,6 +3594,13 @@ def train_ranker(
             colsample_bytree=config.xgb_colsample_bytree,
             tree_method="hist",
             random_state=config.seed,
+        )
+        LOGGER.info(
+            "Fitting XGBoost ranker: rows=%s groups=%s n_estimators=%s max_depth=%s",
+            f"{len(train_frame):,}",
+            f"{len(train_group):,}",
+            config.xgb_n_estimators,
+            config.xgb_max_depth,
         )
         model.fit(
             train_frame,
@@ -3538,6 +3639,12 @@ def train_ranker(
             dense_dim=train_features["dense_features"].shape[1],
             retriever_embedding_dim=train_features["user_embedding"].shape[1],
         )
+        LOGGER.info(
+            "Fitting DLRM ranker: rows=%s epochs=%s batch_size=%s",
+            f"{len(train_labels):,}",
+            config.ranker_epochs,
+            config.ranker_batch_size,
+        )
         history = model.fit(
             train_features,
             train_labels,
@@ -3556,6 +3663,7 @@ def train_ranker(
         gc.collect()
         model.save_weights(config.model_dir / f"{embedding_retriever.variant}_ranker.weights.h5")
         model.save(config.model_dir / f"{embedding_retriever.variant}_ranker.keras", overwrite=True)
+    LOGGER.info("Evaluating trained ranker")
     metrics = evaluate_ranker(prepared, split_artifacts, retrievers, model, backend=backend)
     output_name = "hybrid_union" if isinstance(retrievers, dict) else embedding_retriever.variant
     metrics.to_csv(config.eval_dir / f"{output_name}_{backend}_ranker_metrics.csv", index=False)

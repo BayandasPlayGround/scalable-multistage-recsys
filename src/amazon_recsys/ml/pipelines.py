@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +11,17 @@ from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import EvaluationMetricPreview, EvaluationSummary, MlflowRunInfo
 from amazon_recsys.ml import core
 from amazon_recsys.observability.mlflow import MLflowTracker
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _elapsed(start_time: float) -> str:
+    seconds = time.perf_counter() - start_time
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remaining_seconds = divmod(seconds, 60)
+    return f"{int(minutes)}m {remaining_seconds:.0f}s"
 
 
 def _metric_preview(csv_path: Path) -> EvaluationMetricPreview:
@@ -98,12 +111,63 @@ class PackageTrainingPipeline:
         return pipeline_config_from_settings(self.settings)
 
     def run(self, force_rebuild: bool = False) -> TrainingSession:
+        run_start = time.perf_counter()
         config = self.build_pipeline_config()
+        LOGGER.info(
+            "Training run started: run_name=%s profile=%s categories=%s artifact_root=%s force_rebuild=%s",
+            config.run_name,
+            config.run_profile,
+            ",".join(config.categories),
+            config.artifact_root,
+            force_rebuild,
+        )
+        LOGGER.info(
+            "Training limits: dev_mode=%s dev_fraction=%s k_core=%s neural_retriever=%s retriever_cap=%s ranker_cap=%s eval_user_cap=%s",
+            config.dev_mode,
+            config.dev_fraction,
+            config.k_core,
+            config.enable_neural_retriever,
+            config.retriever_train_example_cap,
+            config.ranker_train_example_cap,
+            config.eval_user_cap,
+        )
+        stage_start = time.perf_counter()
+        LOGGER.info("Stage 1/6: preparing corpus and feature cache")
         prepared = core.prepare_corpus(config, force_rebuild=force_rebuild)
+        LOGGER.info(
+            "Stage 1/6 complete in %s: interactions=%s hard_negatives=%s items=%s",
+            _elapsed(stage_start),
+            f"{len(prepared.interactions):,}",
+            f"{len(prepared.hard_negatives):,}",
+            f"{len(prepared.item_features):,}",
+        )
+        stage_start = time.perf_counter()
+        LOGGER.info("Stage 2/6: building train/validation/test splits")
         split_artifacts = core.make_splits(prepared)
+        LOGGER.info(
+            "Stage 2/6 complete in %s: train=%s val=%s test=%s users=%s",
+            _elapsed(stage_start),
+            f"{len(split_artifacts.train_examples):,}",
+            f"{len(split_artifacts.val_examples):,}",
+            f"{len(split_artifacts.test_examples):,}",
+            f"{len(split_artifacts.user_id_to_idx):,}",
+        )
+        stage_start = time.perf_counter()
+        LOGGER.info("Stage 3/6: training retrievers")
         retrievers = core.train_retrievers(prepared, split_artifacts)
+        LOGGER.info("Stage 3/6 complete in %s: retrievers=%s", _elapsed(stage_start), ",".join(sorted(retrievers)))
+        stage_start = time.perf_counter()
+        LOGGER.info("Stage 4/6: training %s ranker", config.ranker_backend)
         ranker = core.train_ranker(prepared, split_artifacts, retrievers, backend=config.ranker_backend)
+        LOGGER.info("Stage 4/6 complete in %s: backend=%s", _elapsed(stage_start), ranker.backend)
+        stage_start = time.perf_counter()
+        LOGGER.info("Stage 5/6: collecting evaluation summary")
         evaluation_summary = collect_evaluation_summary(config)
+        LOGGER.info(
+            "Stage 5/6 complete in %s: metric_files=%s",
+            _elapsed(stage_start),
+            len(evaluation_summary.metric_files),
+        )
         session = TrainingSession(
             settings=self.settings,
             pipeline_config=config,
@@ -113,15 +177,35 @@ class PackageTrainingPipeline:
             ranker=ranker,
             evaluation_summary=evaluation_summary,
         )
+        stage_start = time.perf_counter()
+        LOGGER.info("Stage 6/6: logging training metadata to MLflow if enabled")
         tracking_metadata = self.mlflow_tracker.log_training_session(session)
         if tracking_metadata is not None:
             session.mlflow = tracking_metadata
+            LOGGER.info(
+                "Stage 6/6 complete in %s: mlflow_run_id=%s experiment=%s",
+                _elapsed(stage_start),
+                tracking_metadata.run_id,
+                tracking_metadata.experiment_name,
+            )
+        else:
+            LOGGER.info("Stage 6/6 complete in %s: MLflow disabled", _elapsed(stage_start))
+        LOGGER.info("Training run finished in %s: run_name=%s", _elapsed(run_start), config.run_name)
         return session
 
     def evaluate(self, force_rebuild: bool = False) -> EvaluationSummary:
+        run_start = time.perf_counter()
         config = self.build_pipeline_config()
         eval_dir = Path(config.eval_dir)
+        LOGGER.info(
+            "Evaluation requested: run_name=%s profile=%s eval_dir=%s force_rebuild=%s",
+            config.run_name,
+            config.run_profile,
+            eval_dir,
+            force_rebuild,
+        )
         if not eval_dir.exists() or not any(eval_dir.glob("*_metrics.csv")):
+            LOGGER.info("Evaluation metrics are missing; running training first")
             session = self.run(force_rebuild=force_rebuild)
             summary = EvaluationSummary.from_dict(session.evaluation_summary.to_dict())
             if session.mlflow is not None:
@@ -131,4 +215,5 @@ class PackageTrainingPipeline:
         tracking_metadata = self.mlflow_tracker.log_evaluation_summary(config, summary)
         if tracking_metadata is not None:
             summary.mlflow = tracking_metadata
+        LOGGER.info("Evaluation summary finished in %s: metric_files=%s", _elapsed(run_start), len(summary.metric_files))
         return summary
