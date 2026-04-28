@@ -33,6 +33,53 @@ The training and export entry point is:
 python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
 ```
 
+## Training Configuration
+
+Training is configured from `.env`, temporary `AMAZON_RECSYS_*` environment variables, and a few CLI flags. The CLI flags are intentionally small:
+
+- `--run-name`: names the artifact folder under `artifacts/amazon_recsys/<run-name>/`
+- `--run-profile`: chooses `debug`, `quality`, or `full`
+- `--force-rebuild`: rebuilds cached corpus artifacts when you need a clean preprocessing run
+- `--version`: sets the exported bundle version for `export-bundle`
+- `--activate`: makes the exported bundle the serving bundle
+
+The most important data-volume controls are:
+
+- `AMAZON_RECSYS_RUN_PROFILE`: broad preset. `debug` reads up to 100k review rows per category and keeps small training caps; `quality` uses the full available category files with moderate caps; `full` uses the full files, enables the neural retriever, and removes the retriever training cap.
+- `AMAZON_RECSYS_CATEGORIES`: JSON list of categories to train on, for example `["All_Beauty"]` for a smaller single-category run or `["All_Beauty","Automotive","Industrial_and_Scientific"]` for the default three-category run.
+- `AMAZON_RECSYS_DEV_MODE` and `AMAZON_RECSYS_DEV_FRACTION`: deterministic sampling before preprocessing. This is useful for quick experiments against a fraction of each configured category.
+- `AMAZON_RECSYS_K_CORE`: minimum positive interactions required per user and item. Lower values keep more sparse data; higher values produce a denser but smaller training graph.
+- `AMAZON_RECSYS_RANKER_TRAIN_EXAMPLE_CAP`, `AMAZON_RECSYS_RANKER_VAL_EXAMPLE_CAP`, and `AMAZON_RECSYS_EVAL_USER_CAP`: cap ranker and evaluation workload without changing the raw data scan.
+- `AMAZON_RECSYS_ENABLE_NEURAL_RETRIEVER`: controls whether the TensorFlow two-tower retriever is trained. Keep this off for fast local and CPU runs; enable it for production-quality experiments when compute allows.
+
+For a quick small run:
+
+```powershell
+$env:AMAZON_RECSYS_CATEGORIES='["All_Beauty"]'
+$env:AMAZON_RECSYS_DEV_MODE="true"
+$env:AMAZON_RECSYS_DEV_FRACTION="0.1"
+python -m amazon_recsys.cli.main export-bundle --run-name beauty-dev --run-profile debug --activate
+```
+
+For a production-style training run:
+
+```powershell
+$env:AMAZON_RECSYS_ENVIRONMENT="production"
+$env:AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING="false"
+$env:AMAZON_RECSYS_MLFLOW_ENABLED="true"
+$env:AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME="amazon-recsys-prod"
+$env:AMAZON_RECSYS_CATEGORIES='["All_Beauty","Automotive","Industrial_and_Scientific"]'
+python -m amazon_recsys.cli.main export-bundle --run-name prod-2026-04-28 --run-profile quality --version prod-2026-04-28
+```
+
+Review the metrics and exported artifacts before activation:
+
+```powershell
+python -m amazon_recsys.cli.main activate-bundle prod-2026-04-28
+```
+
+Use [`docs/running-the-app.md`](docs/running-the-app.md) for the detailed training configuration guide, including how profiles change the amount of data and compute used.
+
 ## Practical Azure Implementation
 
 In practice, this system would usually sit behind a web or mobile product as an online recommendation service. A common Azure shape is:
