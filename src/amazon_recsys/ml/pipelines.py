@@ -54,6 +54,8 @@ def pipeline_config_from_settings(settings: AppSettings) -> core.PipelineConfig:
         dev_mode=settings.training.dev_mode,
         dev_fraction=settings.training.dev_fraction,
         show_progress=settings.training.show_progress,
+        train_positive_cap=settings.training.train_positive_cap,
+        split_eval_example_cap=settings.training.split_eval_example_cap,
         metadata_download_if_missing=settings.data.metadata_download_if_missing,
         enable_neural_retriever=settings.retrieval.enable_neural_retriever,
         retrieval_top_k=settings.retrieval.retrieval_top_k,

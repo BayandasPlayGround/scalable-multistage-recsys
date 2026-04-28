@@ -166,6 +166,8 @@ The practical controls are:
 | `AMAZON_RECSYS_DEV_MODE` | Enables deterministic sampling before preprocessing. |
 | `AMAZON_RECSYS_DEV_FRACTION` | Fraction of configured category rows to keep when dev mode is enabled. Must be greater than `0` and less than or equal to `1`. |
 | `AMAZON_RECSYS_K_CORE` | Minimum positive interactions per user and item. Lower values keep more sparse users/items; higher values reduce data but improve density. |
+| `AMAZON_RECSYS_TRAIN_POSITIVE_CAP` | Caps training split examples while they are being generated. This is the main memory control for Stage 2 split construction. |
+| `AMAZON_RECSYS_SPLIT_EVAL_EXAMPLE_CAP` | Caps validation and test split examples while they are being generated. This keeps evaluation/ranker validation sets from holding millions of users in memory. |
 | `AMAZON_RECSYS_RANKER_TRAIN_EXAMPLE_CAP` | Caps examples used to train the ranker after train/validation/test examples are built. |
 | `AMAZON_RECSYS_RANKER_VAL_EXAMPLE_CAP` | Caps validation examples used by the ranker. |
 | `AMAZON_RECSYS_EVAL_USER_CAP` | Caps users evaluated in offline retrieval/ranking metrics. |
@@ -186,6 +188,8 @@ $env:AMAZON_RECSYS_CATEGORIES='["All_Beauty"]'
 $env:AMAZON_RECSYS_DEV_MODE="true"
 $env:AMAZON_RECSYS_DEV_FRACTION="0.1"
 $env:AMAZON_RECSYS_K_CORE="2"
+$env:AMAZON_RECSYS_TRAIN_POSITIVE_CAP="50000"
+$env:AMAZON_RECSYS_SPLIT_EVAL_EXAMPLE_CAP="1000"
 $env:AMAZON_RECSYS_RANKER_TRAIN_EXAMPLE_CAP="1000"
 $env:AMAZON_RECSYS_RANKER_VAL_EXAMPLE_CAP="250"
 python -m amazon_recsys.cli.main export-bundle --run-name beauty-small --run-profile debug --activate
@@ -198,6 +202,8 @@ $env:AMAZON_RECSYS_CATEGORIES='["All_Beauty","Automotive","Industrial_and_Scient
 $env:AMAZON_RECSYS_DEV_MODE="false"
 $env:AMAZON_RECSYS_K_CORE="3"
 $env:AMAZON_RECSYS_ENABLE_NEURAL_RETRIEVER="false"
+$env:AMAZON_RECSYS_TRAIN_POSITIVE_CAP="500000"
+$env:AMAZON_RECSYS_SPLIT_EVAL_EXAMPLE_CAP="5000"
 $env:AMAZON_RECSYS_RANKER_TRAIN_EXAMPLE_CAP="5000"
 $env:AMAZON_RECSYS_EVAL_USER_CAP="2000"
 python -m amazon_recsys.cli.main export-bundle --run-name quality-local --run-profile quality --activate
@@ -210,6 +216,8 @@ $env:AMAZON_RECSYS_CATEGORIES='["All_Beauty","Automotive","Industrial_and_Scient
 $env:AMAZON_RECSYS_DEV_MODE="false"
 $env:AMAZON_RECSYS_K_CORE="5"
 $env:AMAZON_RECSYS_ENABLE_NEURAL_RETRIEVER="true"
+$env:AMAZON_RECSYS_TRAIN_POSITIVE_CAP="2000000"
+$env:AMAZON_RECSYS_SPLIT_EVAL_EXAMPLE_CAP="10000"
 $env:AMAZON_RECSYS_RANKER_TRAIN_EXAMPLE_CAP="50000"
 $env:AMAZON_RECSYS_RANKER_VAL_EXAMPLE_CAP="5000"
 python -m amazon_recsys.cli.main export-bundle --run-name prod-candidate --run-profile full --version prod-candidate

@@ -79,6 +79,7 @@ class PipelineConfig:
     history_len: int = 10
     max_rows_per_category: int | None = None
     train_positive_cap: int = 2_000_000
+    split_eval_example_cap: int | None = None
     review_chunk_rows: int = 250_000
     text_max_features: int = 12_000
     text_svd_dim: int = 64
@@ -312,6 +313,7 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "ranker_candidate_top_k": 75,
             "ranker_train_example_cap": 2_000,
             "ranker_val_example_cap": 500,
+            "split_eval_example_cap": 1_000,
         },
         "quality": {
             "max_rows_per_category": None,
@@ -324,6 +326,7 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "ranker_candidate_top_k": 100,
             "ranker_train_example_cap": 5_000,
             "ranker_val_example_cap": 1_000,
+            "split_eval_example_cap": 2_000,
         },
         "full": {
             "max_rows_per_category": None,
@@ -336,6 +339,7 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "ranker_candidate_top_k": 200,
             "ranker_train_example_cap": 50_000,
             "ranker_val_example_cap": 5_000,
+            "split_eval_example_cap": None,
         },
     }
     field_defaults = {
@@ -365,6 +369,7 @@ def _cache_sensitive_config(config: PipelineConfig) -> dict[str, object]:
         "history_len",
         "max_rows_per_category",
         "train_positive_cap",
+        "split_eval_example_cap",
         "review_chunk_rows",
         "text_max_features",
         "text_svd_dim",
@@ -1250,6 +1255,24 @@ def _sample_training_examples(df: pd.DataFrame, cap: int, seed: int) -> pd.DataF
     return sampled.drop(columns=["target_month"], errors="ignore").reset_index(drop=True)
 
 
+def _append_reservoir_sample(
+    rows: list[Record],
+    record: Record,
+    *,
+    seen_count: int,
+    cap: int | None,
+    rng: np.random.Generator,
+) -> int:
+    seen_count += 1
+    if cap is None or cap <= 0 or len(rows) < cap:
+        rows.append(record)
+        return seen_count
+    replacement_index = int(rng.integers(0, seen_count))
+    if replacement_index < cap:
+        rows[replacement_index] = record
+    return seen_count
+
+
 def _compute_prefix_features(
     prefix_rows: pd.DataFrame,
     target_timestamp_ms: int,
@@ -1289,10 +1312,17 @@ def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
     interactions = prepared.interactions.copy()
     interactions["item_idx"] = interactions["parent_asin"].map(prepared.item_id_to_idx).astype(np.int32)
     interactions = interactions.sort_values(["user_id", "timestamp", "item_idx"]).reset_index(drop=True)
-    user_sequence_frames: list[pd.DataFrame] = []
     split_rows_train: list[Record] = []
     split_rows_val: list[Record] = []
     split_rows_test: list[Record] = []
+    train_seen_map: dict[str, set[int]] = {}
+    val_seen_map: dict[str, set[int]] = {}
+    test_seen_map: dict[str, set[int]] = {}
+    train_sequence_rows = 0
+    train_seen_count = 0
+    val_seen_count = 0
+    test_seen_count = 0
+    rng = np.random.default_rng(config.seed)
     example_id = 1
     for user_id, group in interactions.groupby("user_id", sort=False):
         if len(group) < max(config.k_core, 3):
@@ -1303,91 +1333,113 @@ def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
         test_row = group.iloc[-1]
         if len(train_group) < 2:
             continue
+        item_list = group["item_idx"].tolist()
+        user_key = str(user_id)
+        train_seen_map[user_key] = set(item_list[:-2])
+        val_seen_map[user_key] = set(item_list[:-2])
+        test_seen_map[user_key] = set(item_list[:-1])
+        train_sequence_rows += len(group)
         for target_pos in range(1, len(train_group)):
             prefix = train_group.iloc[max(0, target_pos - config.history_len):target_pos]
             target_row = train_group.iloc[target_pos]
             prefix_features = _compute_prefix_features(prefix, int(target_row["timestamp"]), item_to_category, config.categories)
-            split_rows_train.append(
-                {
-                    "example_id": example_id,
-                    "split": "train",
-                    "user_id": user_id,
-                    "target_item_idx": int(target_row["item_idx"]),
-                    "target_parent_asin": target_row["parent_asin"],
-                    "target_source_category": target_row["source_category"],
-                    "target_timestamp": pd.to_datetime(int(target_row["timestamp"]), unit="ms", utc=True),
-                    **prefix_features,
-                }
+            train_record = {
+                "example_id": example_id,
+                "split": "train",
+                "user_id": user_id,
+                "target_item_idx": int(target_row["item_idx"]),
+                "target_parent_asin": target_row["parent_asin"],
+                "target_source_category": target_row["source_category"],
+                "target_timestamp": pd.to_datetime(int(target_row["timestamp"]), unit="ms", utc=True),
+                **prefix_features,
+            }
+            train_seen_count = _append_reservoir_sample(
+                split_rows_train,
+                train_record,
+                seen_count=train_seen_count,
+                cap=config.train_positive_cap,
+                rng=rng,
             )
             example_id += 1
         prefix = train_group.iloc[max(0, len(train_group) - config.history_len):].copy()
         prefix_features = _compute_prefix_features(prefix, int(val_row["timestamp"]), item_to_category, config.categories)
-        split_rows_val.append(
-            {
-                "example_id": example_id,
-                "split": "val",
-                "user_id": user_id,
-                "target_item_idx": int(val_row["item_idx"]),
-                "target_parent_asin": val_row["parent_asin"],
-                "target_source_category": val_row["source_category"],
-                "target_timestamp": pd.to_datetime(int(val_row["timestamp"]), unit="ms", utc=True),
-                **prefix_features,
-            }
+        val_record = {
+            "example_id": example_id,
+            "split": "val",
+            "user_id": user_id,
+            "target_item_idx": int(val_row["item_idx"]),
+            "target_parent_asin": val_row["parent_asin"],
+            "target_source_category": val_row["source_category"],
+            "target_timestamp": pd.to_datetime(int(val_row["timestamp"]), unit="ms", utc=True),
+            **prefix_features,
+        }
+        val_seen_count = _append_reservoir_sample(
+            split_rows_val,
+            val_record,
+            seen_count=val_seen_count,
+            cap=config.split_eval_example_cap,
+            rng=rng,
         )
         example_id += 1
-        extended_train = pd.concat([train_group, val_row.to_frame().T], ignore_index=True)
-        prefix = extended_train.iloc[max(0, len(extended_train) - config.history_len):].copy()
+        test_prefix_end = len(group) - 1
+        prefix = group.iloc[max(0, test_prefix_end - config.history_len):test_prefix_end].copy()
         prefix_features = _compute_prefix_features(prefix, int(test_row["timestamp"]), item_to_category, config.categories)
-        split_rows_test.append(
-            {
-                "example_id": example_id,
-                "split": "test",
-                "user_id": user_id,
-                "target_item_idx": int(test_row["item_idx"]),
-                "target_parent_asin": test_row["parent_asin"],
-                "target_source_category": test_row["source_category"],
-                "target_timestamp": pd.to_datetime(int(test_row["timestamp"]), unit="ms", utc=True),
-                **prefix_features,
-            }
+        test_record = {
+            "example_id": example_id,
+            "split": "test",
+            "user_id": user_id,
+            "target_item_idx": int(test_row["item_idx"]),
+            "target_parent_asin": test_row["parent_asin"],
+            "target_source_category": test_row["source_category"],
+            "target_timestamp": pd.to_datetime(int(test_row["timestamp"]), unit="ms", utc=True),
+            **prefix_features,
+        }
+        test_seen_count = _append_reservoir_sample(
+            split_rows_test,
+            test_record,
+            seen_count=test_seen_count,
+            cap=config.split_eval_example_cap,
+            rng=rng,
         )
         example_id += 1
-        user_sequence_frames.append(group)
     train_examples = pd.DataFrame(split_rows_train)
     val_examples = pd.DataFrame(split_rows_val)
     test_examples = pd.DataFrame(split_rows_test)
+    del split_rows_train
+    del split_rows_val
+    del split_rows_test
+    del interactions
+    gc.collect()
     if train_examples.empty or val_examples.empty or test_examples.empty:
         raise RuntimeError(
             "Split generation produced an empty train/val/test split. "
             "Increase dev_fraction or max_rows_per_category, or lower k_core if you are using a very small dev sample."
         )
-    train_examples = _sample_training_examples(train_examples, cap=config.train_positive_cap, seed=config.seed)
     LOGGER.info(
-        "Split examples built: train=%s val=%s test=%s train_positive_cap=%s",
+        "Split examples built: train=%s/%s val=%s/%s test=%s/%s train_positive_cap=%s split_eval_example_cap=%s",
         f"{len(train_examples):,}",
+        f"{train_seen_count:,}",
         f"{len(val_examples):,}",
+        f"{val_seen_count:,}",
         f"{len(test_examples):,}",
+        f"{test_seen_count:,}",
         config.train_positive_cap,
+        config.split_eval_example_cap,
     )
     unique_users = pd.Index(pd.concat([train_examples["user_id"], val_examples["user_id"], test_examples["user_id"]]).astype(str).unique())
     user_id_to_idx = {user_id: idx + 1 for idx, user_id in enumerate(unique_users)}
     user_idx_to_id = {idx: user_id for user_id, idx in user_id_to_idx.items()}
+    needed_users = set(user_id_to_idx)
+    train_seen_map = {user_id: seen for user_id, seen in train_seen_map.items() if user_id in needed_users}
+    val_seen_map = {user_id: seen for user_id, seen in val_seen_map.items() if user_id in needed_users}
+    test_seen_map = {user_id: seen for user_id, seen in test_seen_map.items() if user_id in needed_users}
     for frame in [train_examples, val_examples, test_examples]:
         frame["user_idx"] = frame["user_id"].map(user_id_to_idx).astype(np.int32)
-    train_sequences = pd.concat(user_sequence_frames, ignore_index=True)
-    train_sequences = train_sequences.sort_values(["user_id", "timestamp"]).reset_index(drop=True)
     LOGGER.info(
         "Split state ready: users=%s train_sequence_rows=%s",
         f"{len(user_id_to_idx):,}",
-        f"{len(train_sequences):,}",
+        f"{train_sequence_rows:,}",
     )
-    train_seen_map: dict[str, set[int]] = {}
-    val_seen_map: dict[str, set[int]] = {}
-    test_seen_map: dict[str, set[int]] = {}
-    for user_id, group in train_sequences.groupby("user_id", sort=False):
-        item_list = group["item_idx"].tolist()
-        train_seen_map[str(user_id)] = set(item_list[:-2])
-        val_seen_map[str(user_id)] = set(item_list[:-2])
-        test_seen_map[str(user_id)] = set(item_list[:-1])
     train_item_popularity = Counter(train_examples["target_item_idx"].tolist())
     category_item_popularity: dict[str, Counter] = defaultdict(Counter)
     for _, row in train_examples.iterrows():
@@ -1397,13 +1449,16 @@ def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
         for history_item in row["history_item_idxs"]:
             cooccurrence[int(history_item)][int(row["target_item_idx"])] += 1
     hard_negative_history: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    hard_negatives = prepared.hard_negatives.copy()
+    hard_negatives = prepared.hard_negatives[["user_id", "timestamp", "parent_asin"]].copy()
+    hard_negatives = hard_negatives[hard_negatives["user_id"].astype(str).isin(needed_users)]
     hard_negatives["item_idx"] = hard_negatives["parent_asin"].map(prepared.item_id_to_idx)
     hard_negatives = hard_negatives.dropna(subset=["item_idx"])
     for _, row in hard_negatives.iterrows():
         hard_negative_history[str(row["user_id"])].append((int(row["timestamp"]), int(row["item_idx"])))
     for user_id in list(hard_negative_history.keys()):
         hard_negative_history[user_id] = sorted(hard_negative_history[user_id], key=lambda value: value[0])
+    del hard_negatives
+    gc.collect()
     train_examples = train_examples.sort_values("target_timestamp").reset_index(drop=True)
     val_examples = val_examples.sort_values("target_timestamp").reset_index(drop=True)
     test_examples = test_examples.sort_values("target_timestamp").reset_index(drop=True)
@@ -3969,6 +4024,7 @@ def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
             {"name": "k_core", "value": config.k_core},
             {"name": "history_len", "value": config.history_len},
             {"name": "train_positive_cap", "value": config.train_positive_cap},
+            {"name": "split_eval_example_cap", "value": config.split_eval_example_cap},
             {"name": "negatives_per_positive", "value": config.negatives_per_positive},
             {"name": "retriever_train_example_cap", "value": config.retriever_train_example_cap},
             {"name": "retriever_batch_size", "value": config.retriever_batch_size},

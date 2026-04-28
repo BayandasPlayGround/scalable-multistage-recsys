@@ -31,6 +31,8 @@ class TrainingConfig(BaseModel):
     dev_fraction: float = 0.2
     show_progress: bool = False
     eval_user_cap: int | None = 250
+    train_positive_cap: int = 2_000_000
+    split_eval_example_cap: int | None = None
 
 
 class RetrievalConfig(BaseModel):
@@ -151,6 +153,8 @@ class AppSettings(BaseSettings):
     dev_fraction: float = 0.2
     show_progress: bool = False
     eval_user_cap: int | None = 250
+    train_positive_cap: int = 2_000_000
+    split_eval_example_cap: int | None = None
 
     enable_neural_retriever: bool = False
     retrieval_top_k: int = 50
@@ -297,6 +301,8 @@ class AppSettings(BaseSettings):
             dev_fraction=self.dev_fraction,
             show_progress=self.show_progress,
             eval_user_cap=self.eval_user_cap,
+            train_positive_cap=self.train_positive_cap,
+            split_eval_example_cap=self.split_eval_example_cap,
         )
 
     @property
