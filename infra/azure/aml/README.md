@@ -1,5 +1,7 @@
 # Azure ML Scaffold
 
+[Back to main README](../../../README.md)
+
 This folder is a local-first placeholder for the batch training path.
 
 Current contract:

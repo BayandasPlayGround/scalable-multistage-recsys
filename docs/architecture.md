@@ -1,5 +1,7 @@
 # Architecture Guide
 
+[Back to docs hub](README.md) | [Back to main README](../README.md)
+
 ## System Shape
 
 The repo is centered on the package under `src/amazon_recsys/`. That package owns the recommender, serving, monitoring, configuration, and CLI flows. Notebook files, template assets, and deployment folders still exist, but they are support layers around the package rather than the main implementation.

@@ -1,5 +1,7 @@
 # Hybrid Amazon Reviews Recommender System
 
+[Back to main README](../README.md)
+
 The notebook workflow in this repo is a client of the package-owned recommender, not a separate implementation.
 
 - notebook front end: [RecSys.ipynb](./RecSys.ipynb)

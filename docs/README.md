@@ -1,5 +1,7 @@
 ﻿# Documentation
 
+[Back to main README](../README.md)
+
 This folder holds the detailed project documentation that used to live in the top-level README.
 
 ## Guides
