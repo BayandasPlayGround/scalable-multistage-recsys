@@ -73,3 +73,39 @@ def test_neural_retriever_failures_raise_when_enabled(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="two_tower retriever exploded"):
         core.train_retrievers(prepared, split_artifacts)
+
+
+@pytest.mark.retrieval
+def test_latent_cf_retriever_handles_users_removed_by_split_caps(synthetic_workspace: Path) -> None:
+    config = core.PipelineConfig(
+        base_dir=synthetic_workspace,
+        categories=("All_Beauty",),
+        run_name="latent-capped-users",
+        run_profile="debug",
+        seed=42,
+        k_core=2,
+        show_progress=False,
+        train_positive_cap=1,
+        split_eval_example_cap=1,
+        eval_user_cap=2,
+        retrieval_top_k=3,
+        latent_cf_components=2,
+        ann_trees=2,
+        text_max_features=32,
+        text_svd_dim=4,
+        metadata_download_if_missing=False,
+        memory_map_item_text=False,
+    )
+    config = core.apply_run_profile(config)
+    prepared = core.prepare_corpus(config, force_rebuild=True)
+    split_artifacts = core.make_splits(prepared)
+
+    training_users = set(core._get_training_interactions(prepared)["user_id"].astype(str).unique())
+    split_users = set(split_artifacts.user_id_to_idx)
+
+    assert training_users - split_users
+
+    retriever = core.train_latent_cf_retriever(prepared, split_artifacts)
+
+    assert retriever.variant == "latent_cf"
+    assert retriever.metadata["user_vectors"].shape[0] == len(split_artifacts.user_id_to_idx)

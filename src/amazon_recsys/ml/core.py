@@ -2334,6 +2334,23 @@ def train_latent_cf_retriever(prepared: PreparedArtifacts, split_artifacts: Spli
     if train_interactions.empty:
         raise RuntimeError("No training interactions were available for the latent collaborative retriever.")
     train_interactions = train_interactions.copy()
+    train_interactions["user_id"] = train_interactions["user_id"].astype(str)
+    known_users = set(split_artifacts.user_id_to_idx)
+    original_interactions = len(train_interactions)
+    train_interactions = train_interactions[train_interactions["user_id"].isin(known_users)].copy()
+    if train_interactions.empty:
+        raise RuntimeError(
+            "No latent collaborative-filtering interactions matched the split user index. "
+            "Increase train_positive_cap/split_eval_example_cap or disable very aggressive split sampling."
+        )
+    dropped_interactions = original_interactions - len(train_interactions)
+    if dropped_interactions:
+        LOGGER.info(
+            "Latent CF training restricted to split users: kept_interactions=%s dropped_interactions=%s users=%s",
+            f"{len(train_interactions):,}",
+            f"{dropped_interactions:,}",
+            f"{len(known_users):,}",
+        )
     train_interactions["user_idx"] = train_interactions["user_id"].map(split_artifacts.user_id_to_idx).astype(np.int32)
     train_interactions["item_idx"] = train_interactions["parent_asin"].map(prepared.item_id_to_idx).astype(np.int32)
     grouped = (
