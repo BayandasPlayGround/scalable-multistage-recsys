@@ -105,6 +105,17 @@ class MonitoringService:
             .set_index("parent_asin")[popularity_column]
             .to_dict()
         )
+        if bundle.serving_index is not None and not bundle.serving_index.user_summary.empty:
+            user_summary = bundle.serving_index.user_summary.copy()
+            user_summary["user_id"] = user_summary["user_id"].astype(str)
+            user_summary = user_summary.set_index("user_id")
+            user_exists = bool(user_id and str(user_id) in user_summary.index)
+            if provided_history:
+                request_history_length = len(provided_history)
+            elif user_exists and "history_length" in user_summary.columns:
+                request_history_length = int(user_summary.loc[str(user_id), "history_length"])
+            else:
+                request_history_length = 0
 
         request_id = uuid4().hex
         requested_at = utcnow_iso()

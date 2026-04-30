@@ -132,7 +132,7 @@ class PipelineConfig:
         self.base_dir = Path(self.base_dir)
         if not 0 < float(self.dev_fraction) <= 1:
             raise ValueError("dev_fraction must be in the interval (0, 1].")
-        valid_run_profiles = {"debug", "quality", "full"}
+        valid_run_profiles = {"debug", "quality", "quality-neural", "full"}
         if self.run_profile not in valid_run_profiles:
             raise ValueError(f"run_profile must be one of {sorted(valid_run_profiles)}.")
         valid_sampling_strategies = {"user", "stratified_user", "category_balanced_user"}
@@ -209,6 +209,12 @@ class SplitArtifacts:
     category_item_popularity: dict[str, Counter]
     cooccurrence: dict[int, Counter]
     hard_negative_history: dict[str, list[tuple[int, int]]]
+
+
+@dataclass
+class ServingIndex:
+    user_summary: pd.DataFrame
+    user_history: pd.DataFrame
 
 
 @dataclass
@@ -320,6 +326,19 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "retriever_train_example_cap": 100_000,
             "retriever_quality_min_history": 3,
             "enable_neural_retriever": False,
+            "eval_user_cap": 2_000,
+            "candidate_union_top_k": 200,
+            "candidate_union_batch_size": 500,
+            "ranker_candidate_top_k": 100,
+            "ranker_train_example_cap": 5_000,
+            "ranker_val_example_cap": 1_000,
+            "split_eval_example_cap": 2_000,
+        },
+        "quality-neural": {
+            "max_rows_per_category": None,
+            "retriever_train_example_cap": 100_000,
+            "retriever_quality_min_history": 3,
+            "enable_neural_retriever": True,
             "eval_user_cap": 2_000,
             "candidate_union_top_k": 200,
             "candidate_union_batch_size": 500,
@@ -2172,11 +2191,49 @@ def popularity_by_category_candidates(
     global_counter = split_artifacts.train_item_popularity
     for _, example in examples.iterrows():
         seen_items = set(example["history_item_idxs"])
-        category_preferences = {category: float(example[f"pref_{category}"]) for category in split_artifacts.config.categories}
-        dominant_category = max(category_preferences, key=category_preferences.get)
-        category_candidates = _top_items_from_counter(split_artifacts.category_item_popularity.get(dominant_category, Counter()), seen_items, top_k)
+        category_preferences = {
+            category: max(float(example[f"pref_{category}"]), 0.0)
+            for category in split_artifacts.config.categories
+        }
+        positive_preferences = [(category, value) for category, value in category_preferences.items() if value > 0.0]
+        if not positive_preferences:
+            positive_preferences = [(category, 1.0) for category in split_artifacts.config.categories]
+        preference_total = sum(value for _, value in positive_preferences) or float(len(positive_preferences))
+        raw_allocations = [
+            (category, (value / preference_total) * top_k)
+            for category, value in sorted(positive_preferences, key=lambda item: (-item[1], item[0]))
+        ]
+        allocations = {category: int(math.floor(raw_value)) for category, raw_value in raw_allocations}
+        for category, _ in raw_allocations:
+            allocations[category] = max(1, allocations[category])
+        remainder = top_k - sum(allocations.values())
+        if remainder > 0:
+            ranked_remainders = sorted(
+                raw_allocations,
+                key=lambda item: (-(item[1] - math.floor(item[1])), item[0]),
+            )
+            for index in range(remainder):
+                allocations[ranked_remainders[index % len(ranked_remainders)][0]] += 1
+        elif remainder < 0:
+            for category, _ in sorted(raw_allocations, key=lambda item: (item[1] - math.floor(item[1]), item[0])):
+                if remainder == 0:
+                    break
+                removable = min(allocations[category] - 1, abs(remainder))
+                if removable > 0:
+                    allocations[category] -= removable
+                    remainder += removable
+
+        category_candidates: list[int] = []
+        selected = set(seen_items)
+        for category, _ in raw_allocations:
+            quota = allocations.get(category, 0)
+            if quota <= 0:
+                continue
+            candidates = _top_items_from_counter(split_artifacts.category_item_popularity.get(category, Counter()), selected, quota)
+            category_candidates.extend(candidates)
+            selected.update(candidates)
         if len(category_candidates) < top_k:
-            fallback = _top_items_from_counter(global_counter, seen_items.union(category_candidates), top_k - len(category_candidates))
+            fallback = _top_items_from_counter(global_counter, selected, top_k - len(category_candidates))
             category_candidates.extend(fallback)
         for rank, item_idx in enumerate(category_candidates[:top_k], start=1):
             rows.append(
@@ -2604,6 +2661,13 @@ def evaluate_retriever(
         metrics["split"] = split_name
         metrics["variant"] = retriever.variant
         eval_frames.append(metrics)
+        diagnostics = candidate_recall_diagnostics(
+            candidates,
+            split=split_name,
+            variant=retriever.variant,
+            stage="retriever",
+        )
+        diagnostics.to_csv(prepared.config.eval_dir / f"{retriever.variant}_{split_name}_candidate_diagnostics_metrics.csv", index=False)
         candidates.to_parquet(prepared.config.eval_dir / f"{retriever.variant}_{split_name}_retrieval_candidates.parquet", index=False)
     if not eval_frames:
         return _normalize_metrics_frame(None)
@@ -3141,6 +3205,108 @@ def candidate_source_diagnostics(candidates: pd.DataFrame) -> dict[str, pd.DataF
     }
 
 
+def candidate_recall_diagnostics(
+    candidates: pd.DataFrame,
+    *,
+    split: str,
+    variant: str,
+    stage: str,
+) -> pd.DataFrame:
+    columns = [
+        "split",
+        "variant",
+        "stage",
+        "scope",
+        "name",
+        "examples",
+        "hit_rate",
+        "positive_recoveries",
+        "examples_with_positive",
+        "median_positive_rank",
+    ]
+    if candidates.empty or "example_id" not in candidates.columns or "label" not in candidates.columns:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[Record] = []
+    example_hits = candidates.groupby("example_id")["label"].max()
+    positive_rows = candidates[candidates["label"] == 1]
+    rows.append(
+        {
+            "split": split,
+            "variant": variant,
+            "stage": stage,
+            "scope": "overall",
+            "name": "all",
+            "examples": int(len(example_hits)),
+            "hit_rate": float(example_hits.mean()) if not example_hits.empty else 0.0,
+            "positive_recoveries": int(len(positive_rows)),
+            "examples_with_positive": int(positive_rows["example_id"].nunique()) if not positive_rows.empty else 0,
+            "median_positive_rank": float(positive_rows["rank"].median()) if not positive_rows.empty and "rank" in positive_rows.columns else np.nan,
+        }
+    )
+    if "target_source_category" in candidates.columns:
+        category_hits = (
+            candidates.groupby(["target_source_category", "example_id"], as_index=False)["label"]
+            .max()
+        )
+        for category, group in category_hits.groupby("target_source_category", sort=True):
+            positives = positive_rows[positive_rows["target_source_category"] == category] if "target_source_category" in positive_rows.columns else pd.DataFrame()
+            rows.append(
+                {
+                    "split": split,
+                    "variant": variant,
+                    "stage": stage,
+                    "scope": "target_category",
+                    "name": str(category),
+                    "examples": int(len(group)),
+                    "hit_rate": float(group["label"].mean()) if not group.empty else 0.0,
+                    "positive_recoveries": int(len(positives)),
+                    "examples_with_positive": int(positives["example_id"].nunique()) if not positives.empty else 0,
+                    "median_positive_rank": float(positives["rank"].median()) if not positives.empty and "rank" in positives.columns else np.nan,
+                }
+            )
+    source_names = ["cooccurrence", "latent_cf", "content_based", "two_tower", "popularity"]
+    if any(f"from_{source_name}" in candidates.columns for source_name in source_names):
+        for source_name in source_names:
+            flag_col = f"from_{source_name}"
+            if flag_col not in candidates.columns:
+                continue
+            source_candidates = candidates[candidates[flag_col].fillna(0).astype(int) == 1]
+            source_positive = source_candidates[source_candidates["label"] == 1]
+            rows.append(
+                {
+                    "split": split,
+                    "variant": variant,
+                    "stage": stage,
+                    "scope": "candidate_source",
+                    "name": source_name,
+                    "examples": int(source_candidates["example_id"].nunique()) if not source_candidates.empty else 0,
+                    "hit_rate": float(source_positive["example_id"].nunique() / max(candidates["example_id"].nunique(), 1)),
+                    "positive_recoveries": int(len(source_positive)),
+                    "examples_with_positive": int(source_positive["example_id"].nunique()) if not source_positive.empty else 0,
+                    "median_positive_rank": float(source_positive["rank"].median()) if not source_positive.empty and "rank" in source_positive.columns else np.nan,
+                }
+            )
+    elif "source" in candidates.columns:
+        for source_name, source_candidates in candidates.groupby("source", sort=True):
+            source_positive = source_candidates[source_candidates["label"] == 1]
+            rows.append(
+                {
+                    "split": split,
+                    "variant": variant,
+                    "stage": stage,
+                    "scope": "candidate_source",
+                    "name": str(source_name),
+                    "examples": int(source_candidates["example_id"].nunique()) if not source_candidates.empty else 0,
+                    "hit_rate": float(source_positive["example_id"].nunique() / max(candidates["example_id"].nunique(), 1)),
+                    "positive_recoveries": int(len(source_positive)),
+                    "examples_with_positive": int(source_positive["example_id"].nunique()) if not source_positive.empty else 0,
+                    "median_positive_rank": float(source_positive["rank"].median()) if not source_positive.empty and "rank" in source_positive.columns else np.nan,
+                }
+            )
+    return pd.DataFrame(rows, columns=columns)
+
+
 def _hard_negative_flag_for_candidate(
     user_id: str,
     item_idx: int,
@@ -3580,6 +3746,14 @@ def evaluate_ranker(
             eval_examples,
             inject_target_if_missing=False,
         )
+        variant = "hybrid_union" if isinstance(retrievers, dict) else embedding_retriever.variant
+        diagnostics = candidate_recall_diagnostics(
+            candidate_frame,
+            split=split_name,
+            variant=variant,
+            stage="ranker_candidates",
+        )
+        diagnostics.to_csv(prepared.config.eval_dir / f"{variant}_{split_name}_candidate_diagnostics_metrics.csv", index=False)
         if backend == "xgboost":
             ranker_metadata, feature_frame, _, _ = _xgboost_ranker_frame(prepared, split_artifacts, embedding_retriever, candidate_frame)
             ranker_metadata["ranker_score"] = ranker_model.predict(feature_frame).reshape(-1)
@@ -3592,7 +3766,7 @@ def evaluate_ranker(
         ranked["rank"] = ranked.groupby("example_id").cumcount() + 1
         metrics = _metrics_from_ranked_candidates(ranked.rename(columns={"ranker_score": "retrieval_score"}), ks=(10, 50, 100))
         metrics["split"] = split_name
-        metrics["variant"] = "hybrid_union" if isinstance(retrievers, dict) else embedding_retriever.variant
+        metrics["variant"] = variant
         metrics["stage"] = "ranker"
         rows.append(metrics)
         ranked.to_parquet(prepared.config.eval_dir / f"{metrics.iloc[0]['variant']}_{split_name}_ranked_candidates.parquet", index=False)
@@ -3790,6 +3964,105 @@ def get_user_order_history(
             "average_rating",
         ]
     ].reset_index(drop=True)
+
+
+def build_serving_index(prepared: PreparedArtifacts, split_artifacts: SplitArtifacts) -> ServingIndex:
+    examples = split_artifacts.test_examples.copy()
+    summary_columns = ["user_id", "interaction_count", "history_length", "last_ordered_at", "user_idx"]
+    history_columns = [
+        "user_id",
+        "item_idx",
+        "parent_asin",
+        "ordered_at",
+        "timestamp_dt",
+        "review_rating",
+        "verified_purchase",
+        "title",
+        "source_category",
+        "price",
+        "average_rating",
+    ]
+    if examples.empty or prepared.interactions.empty:
+        return ServingIndex(
+            user_summary=pd.DataFrame(columns=summary_columns),
+            user_history=pd.DataFrame(columns=history_columns),
+        )
+
+    examples["user_id"] = examples["user_id"].astype(str)
+    examples["history_length"] = pd.to_numeric(examples["history_length"], errors="coerce").fillna(0).astype(int)
+    examples["target_timestamp"] = pd.to_datetime(examples["target_timestamp"], utc=False)
+    example_cutoffs = (
+        examples.sort_values("target_timestamp")
+        .drop_duplicates("user_id")
+        [["user_id", "target_timestamp"]]
+        .copy()
+    )
+    example_users = set(example_cutoffs["user_id"])
+
+    interactions = prepared.interactions.copy()
+    interactions["user_id"] = interactions["user_id"].astype(str)
+    interactions = interactions[interactions["user_id"].isin(example_users)].copy()
+    if interactions.empty:
+        return ServingIndex(
+            user_summary=pd.DataFrame(columns=summary_columns),
+            user_history=pd.DataFrame(columns=history_columns),
+        )
+    if "timestamp_dt" not in interactions.columns:
+        interactions["timestamp_dt"] = pd.to_datetime(interactions["timestamp"], unit="ms", errors="coerce")
+    if "item_idx" not in interactions.columns:
+        interactions["item_idx"] = interactions["parent_asin"].map(prepared.item_id_to_idx)
+    interactions = interactions.dropna(subset=["item_idx", "timestamp_dt"]).copy()
+    interactions["item_idx"] = interactions["item_idx"].astype(int)
+
+    interaction_counts = (
+        interactions.groupby("user_id", as_index=False)
+        .size()
+        .rename(columns={"size": "interaction_count"})
+    )
+    last_orders = (
+        interactions.groupby("user_id", as_index=False)["timestamp_dt"]
+        .max()
+        .rename(columns={"timestamp_dt": "last_ordered_at"})
+    )
+    last_orders["last_ordered_at"] = last_orders["last_ordered_at"].dt.strftime("%Y-%m-%d")
+    user_idx_frame = pd.DataFrame(
+        {
+            "user_id": list(split_artifacts.user_id_to_idx.keys()),
+            "user_idx": list(split_artifacts.user_id_to_idx.values()),
+        }
+    )
+    user_summary = (
+        examples.groupby("user_id", as_index=False)["history_length"]
+        .max()
+        .merge(interaction_counts, on="user_id", how="left")
+        .merge(last_orders, on="user_id", how="left")
+        .merge(user_idx_frame, on="user_id", how="left")
+    )
+    user_summary["interaction_count"] = user_summary["interaction_count"].fillna(0).astype(int)
+    user_summary["user_idx"] = user_summary["user_idx"].fillna(0).astype(int)
+    user_summary = user_summary[summary_columns].sort_values(
+        ["interaction_count", "history_length", "user_id"],
+        ascending=[False, False, True],
+    )
+
+    history = interactions.merge(example_cutoffs, on="user_id", how="inner")
+    history = history[history["timestamp_dt"] < history["target_timestamp"]].copy()
+    if history.empty:
+        return ServingIndex(
+            user_summary=user_summary.reset_index(drop=True),
+            user_history=pd.DataFrame(columns=history_columns),
+        )
+    item_meta = prepared.item_features[["parent_asin", "title", "source_category", "price", "average_rating"]].copy()
+    history = history.drop(columns=["source_category"], errors="ignore")
+    history = history.merge(item_meta, on="parent_asin", how="left")
+    history["ordered_at"] = history["timestamp_dt"].dt.strftime("%Y-%m-%d")
+    history["review_rating"] = pd.to_numeric(history["rating"], errors="coerce")
+    history["verified_purchase"] = pd.to_numeric(history["verified_purchase"], errors="coerce").fillna(0).astype(int)
+    history = history.sort_values(["user_id", "timestamp_dt", "parent_asin"]).reset_index(drop=True)
+    return ServingIndex(
+        user_summary=user_summary.reset_index(drop=True),
+        user_history=history[history_columns].reset_index(drop=True),
+    )
 
 
 def _resolve_history_item_idxs(

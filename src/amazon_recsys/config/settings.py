@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_CATEGORIES = ("All_Beauty", "Automotive", "Industrial_and_Scientific")
-VALID_RUN_PROFILES = {"debug", "quality", "full"}
+VALID_RUN_PROFILES = {"debug", "quality", "quality-neural", "full"}
 VALID_RANKER_BACKENDS = {"xgboost", "dlrm"}
 
 

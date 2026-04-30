@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 ONNX_BUNDLE_FORMAT = "onnx"
-ONNX_BUNDLE_SCHEMA_VERSION = 1
+ONNX_BUNDLE_SCHEMA_VERSION = 2
 
 
 def generate_bundle_version(run_name: str) -> str:
@@ -90,6 +90,7 @@ def build_runtime_bundle(session: TrainingSession, manifest: BundleManifest) -> 
         split_artifacts=split_artifacts,
         retrievers=retrievers,
         ranker=ranker,
+        serving_index=core.build_serving_index(prepared, split_artifacts),
         evaluation_summary=session.evaluation_summary,
         is_mock=False,
     )
@@ -188,6 +189,75 @@ def _read_frame(path: Path) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+def _empty_interactions_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "user_id",
+            "parent_asin",
+            "timestamp",
+            "timestamp_dt",
+            "rating",
+            "verified_purchase",
+            "item_idx",
+            "source_category",
+        ]
+    )
+
+
+def _empty_hard_negatives_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=["user_id", "parent_asin", "timestamp", "timestamp_dt", "item_idx"])
+
+
+def _empty_examples_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "example_id",
+            "split",
+            "user_id",
+            "target_item_idx",
+            "target_parent_asin",
+            "target_source_category",
+            "target_timestamp",
+            "history_item_idxs",
+            "history_length",
+            "user_interaction_count",
+            "user_mean_rating",
+            "user_verified_rate",
+            "days_since_last",
+            "avg_days_between",
+            "user_idx",
+        ]
+    )
+
+
+def _write_serving_index(serving_index: core.ServingIndex | None, bundle_dir: Path) -> dict[str, object] | None:
+    if serving_index is None:
+        return None
+    data_dir = bundle_dir / "data"
+    paths = {
+        "user_summary": data_dir / "serving_user_summary.parquet",
+        "user_history": data_dir / "serving_user_history.parquet",
+    }
+    _write_frame(paths["user_summary"], serving_index.user_summary)
+    _write_frame(paths["user_history"], serving_index.user_history)
+    return {"paths": {key: _relative(path, bundle_dir) for key, path in paths.items()}}
+
+
+def _load_serving_index(bundle_dir: Path, payload: dict[str, object] | None) -> core.ServingIndex | None:
+    if not payload:
+        return None
+    paths = payload.get("paths")
+    if not isinstance(paths, dict):
+        return None
+    user_summary = _read_frame(bundle_dir / str(paths["user_summary"]))
+    user_history = _read_frame(bundle_dir / str(paths["user_history"]))
+    if "user_id" in user_summary.columns:
+        user_summary["user_id"] = user_summary["user_id"].astype(str)
+    if "user_id" in user_history.columns:
+        user_history["user_id"] = user_history["user_id"].astype(str)
+    return core.ServingIndex(user_summary=user_summary, user_history=user_history)
+
+
 def _write_prepared_artifacts(prepared: core.PreparedArtifacts, bundle_dir: Path) -> dict[str, object]:
     data_dir = bundle_dir / "data"
     paths = {
@@ -214,7 +284,12 @@ def _write_prepared_artifacts(prepared: core.PreparedArtifacts, bundle_dir: Path
     }
 
 
-def _load_prepared_artifacts(bundle_dir: Path, payload: dict[str, object]) -> core.PreparedArtifacts:
+def _load_prepared_artifacts(
+    bundle_dir: Path,
+    payload: dict[str, object],
+    *,
+    serving_mode: bool = False,
+) -> core.PreparedArtifacts:
     paths = payload["paths"]
     assert isinstance(paths, dict)
     config = _load_pipeline_config(_read_json(bundle_dir / str(paths["config"])))
@@ -225,8 +300,8 @@ def _load_prepared_artifacts(bundle_dir: Path, payload: dict[str, object]) -> co
         config=config,
         raw_review_stats=_read_frame(bundle_dir / str(paths["raw_review_stats"])),
         kcore_stats=_read_frame(bundle_dir / str(paths["kcore_stats"])),
-        interactions=_read_frame(bundle_dir / str(paths["interactions"])),
-        hard_negatives=_read_frame(bundle_dir / str(paths["hard_negatives"])),
+        interactions=_empty_interactions_frame() if serving_mode else _read_frame(bundle_dir / str(paths["interactions"])),
+        hard_negatives=_empty_hard_negatives_frame() if serving_mode else _read_frame(bundle_dir / str(paths["hard_negatives"])),
         item_features=_read_frame(bundle_dir / str(paths["item_features"])),
         item_text_matrix=np.load(bundle_dir / str(paths["item_text_matrix"]), mmap_mode="r" if config.memory_map_item_text else None),
         vectorizer=None,
@@ -237,13 +312,23 @@ def _load_prepared_artifacts(bundle_dir: Path, payload: dict[str, object]) -> co
     )
 
 
-def _write_split_artifacts(split_artifacts: core.SplitArtifacts, bundle_dir: Path) -> dict[str, object]:
+def _compact_counter(counter: Counter, limit: int | None = None) -> dict[str, object]:
+    items = counter.most_common(limit) if limit is not None else counter.items()
+    return _counter_payload(Counter(dict(items)))
+
+
+def _write_split_artifacts(
+    split_artifacts: core.SplitArtifacts,
+    bundle_dir: Path,
+    serving_index: core.ServingIndex | None = None,
+) -> dict[str, object]:
     data_dir = bundle_dir / "data"
     paths = {
         "train_examples": data_dir / "train_examples.parquet",
         "val_examples": data_dir / "val_examples.parquet",
         "test_examples": data_dir / "test_examples.parquet",
         "split_state": bundle_dir / "split_state.json",
+        "serving_state": data_dir / "serving_state.json",
     }
     _write_frame(paths["train_examples"], split_artifacts.train_examples)
     _write_frame(paths["val_examples"], split_artifacts.val_examples)
@@ -266,6 +351,48 @@ def _write_split_artifacts(split_artifacts: core.SplitArtifacts, bundle_dir: Pat
         "hard_negative_history": _hard_negative_payload(split_artifacts.hard_negative_history),
     }
     _write_json(paths["split_state"], state)
+    serving_user_ids: set[str] = set()
+    serving_history_items: set[int] = set()
+    if serving_index is not None:
+        if "user_id" in serving_index.user_summary.columns:
+            serving_user_ids = set(serving_index.user_summary["user_id"].astype(str))
+        if "item_idx" in serving_index.user_history.columns:
+            serving_history_items = {
+                int(value)
+                for value in pd.to_numeric(serving_index.user_history["item_idx"], errors="coerce").dropna().tolist()
+            }
+    compact_cooccurrence_k = max(
+        int(split_artifacts.config.cooccurrence_candidate_k),
+        int(split_artifacts.config.candidate_union_top_k),
+        50,
+    )
+    serving_state = {
+        "user_id_to_idx": {
+            str(user_id): int(user_idx)
+            for user_id, user_idx in split_artifacts.user_id_to_idx.items()
+            if not serving_user_ids or str(user_id) in serving_user_ids
+        },
+        "user_idx_to_id": {
+            str(user_idx): str(user_id)
+            for user_idx, user_id in split_artifacts.user_idx_to_id.items()
+            if not serving_user_ids or str(user_id) in serving_user_ids
+        },
+        "train_seen_map": {},
+        "val_seen_map": {},
+        "test_seen_map": {},
+        "train_item_popularity": _counter_payload(split_artifacts.train_item_popularity),
+        "category_item_popularity": {
+            str(category): _counter_payload(counter)
+            for category, counter in split_artifacts.category_item_popularity.items()
+        },
+        "cooccurrence": {
+            str(item_idx): _compact_counter(counter, compact_cooccurrence_k)
+            for item_idx, counter in split_artifacts.cooccurrence.items()
+            if int(item_idx) in serving_history_items
+        },
+        "hard_negative_history": {},
+    }
+    _write_json(paths["serving_state"], serving_state)
     return {"paths": {key: _relative(path, bundle_dir) for key, path in paths.items()}}
 
 
@@ -273,15 +400,18 @@ def _load_split_artifacts(
     bundle_dir: Path,
     payload: dict[str, object],
     config: core.PipelineConfig,
+    *,
+    serving_mode: bool = False,
 ) -> core.SplitArtifacts:
     paths = payload["paths"]
     assert isinstance(paths, dict)
-    state = _read_json(bundle_dir / str(paths["split_state"]))
+    state_key = "serving_state" if serving_mode and "serving_state" in paths else "split_state"
+    state = _read_json(bundle_dir / str(paths[state_key]))
     user_id_to_idx = {str(key): int(value) for key, value in dict(state["user_id_to_idx"]).items()}
     user_idx_to_id = {int(key): str(value) for key, value in dict(state["user_idx_to_id"]).items()}
     return core.SplitArtifacts(
         config=config,
-        train_examples=_read_frame(bundle_dir / str(paths["train_examples"])),
+        train_examples=_empty_examples_frame() if serving_mode else _read_frame(bundle_dir / str(paths["train_examples"])),
         val_examples=_read_frame(bundle_dir / str(paths["val_examples"])),
         test_examples=_read_frame(bundle_dir / str(paths["test_examples"])),
         user_id_to_idx=user_id_to_idx,
@@ -434,7 +564,8 @@ def save_runtime_bundle(bundle: RuntimeBundle) -> None:
         stale_pickle.unlink()
 
     prepared_payload = _write_prepared_artifacts(bundle.prepared, bundle_dir)
-    split_payload = _write_split_artifacts(bundle.split_artifacts, bundle_dir)
+    split_payload = _write_split_artifacts(bundle.split_artifacts, bundle_dir, serving_index=bundle.serving_index)
+    serving_payload = _write_serving_index(bundle.serving_index, bundle_dir)
     retriever_payload = _write_retriever_artifacts(bundle.retrievers, bundle_dir)
     ranker_payload = _write_ranker_artifacts(bundle.ranker, bundle_dir)
     evaluation_path = Path(manifest.evaluation_summary_path) if manifest.evaluation_summary_path is not None else None
@@ -448,6 +579,7 @@ def save_runtime_bundle(bundle: RuntimeBundle) -> None:
         "manifest": _relative(manifest.manifest_file, bundle_dir),
         "prepared": prepared_payload,
         "split_artifacts": split_payload,
+        "serving_index": serving_payload,
         "retrievers": retriever_payload,
         "ranker": ranker_payload,
         "evaluation_summary": _relative(evaluation_path, bundle_dir) if evaluation_path is not None else None,
@@ -455,14 +587,22 @@ def save_runtime_bundle(bundle: RuntimeBundle) -> None:
     _write_json(manifest.runtime_bundle_file, payload)
 
 
-def load_runtime_bundle(manifest: BundleManifest) -> RuntimeBundle:
+def load_runtime_bundle(manifest: BundleManifest, *, serving_mode: bool = True) -> RuntimeBundle:
     bundle_dir = Path(manifest.bundle_dir)
     payload = _read_json(manifest.runtime_bundle_file)
     if payload.get("bundle_format") != ONNX_BUNDLE_FORMAT:
         raise ValueError(f"Unsupported portable bundle format: {payload.get('bundle_format')!r}")
 
-    prepared = _load_prepared_artifacts(bundle_dir, dict(payload["prepared"]))
-    split_artifacts = _load_split_artifacts(bundle_dir, dict(payload["split_artifacts"]), prepared.config)
+    use_serving_mode = bool(serving_mode and payload.get("serving_index"))
+    prepared = _load_prepared_artifacts(bundle_dir, dict(payload["prepared"]), serving_mode=use_serving_mode)
+    split_artifacts = _load_split_artifacts(
+        bundle_dir,
+        dict(payload["split_artifacts"]),
+        prepared.config,
+        serving_mode=use_serving_mode,
+    )
+    serving_index_payload = payload.get("serving_index")
+    serving_index = _load_serving_index(bundle_dir, dict(serving_index_payload)) if isinstance(serving_index_payload, dict) else None
     retrievers = _load_retriever_artifacts(bundle_dir, dict(payload["retrievers"]), prepared.config)
     ranker = _load_ranker_artifacts(bundle_dir, dict(payload["ranker"]), prepared.config)
     evaluation_summary_path = payload.get("evaluation_summary")
@@ -476,6 +616,7 @@ def load_runtime_bundle(manifest: BundleManifest) -> RuntimeBundle:
         split_artifacts=split_artifacts,
         retrievers=retrievers,
         ranker=ranker,
+        serving_index=serving_index,
         evaluation_summary=evaluation_summary,
         is_mock=False,
     )

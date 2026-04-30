@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
     backfill.add_argument("--bundle-version", default="active")
     backfill.add_argument("--simulate-outcomes", action="store_true")
 
+    diagnose = subparsers.add_parser("diagnose-candidates")
+    diagnose.add_argument("--bundle-version", default="active")
+    diagnose.add_argument("--split", choices=["val", "test"], default="test")
+    diagnose.add_argument("--sample-size", type=int, default=500)
+
     serve = subparsers.add_parser("serve")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
@@ -155,6 +160,59 @@ def main(argv: list[str] | None = None) -> int:
             simulate_outcomes=args.simulate_outcomes,
         )
         print(json.dumps([summary.to_dict() for summary in summaries], indent=2, default=str))
+        return 0
+
+    if args.command == "diagnose-candidates":
+        from amazon_recsys.ml import core
+
+        manifest = (
+            container.artifact_store.read_active_manifest()
+            if args.bundle_version == "active"
+            else container.artifact_store.load_manifest(args.bundle_version)
+        )
+        if manifest is None:
+            raise FileNotFoundError("No active bundle is configured.")
+        bundle = container.artifact_store.load_bundle(manifest)
+        examples = bundle.split_artifacts.test_examples if args.split == "test" else bundle.split_artifacts.val_examples
+        if args.sample_size and len(examples) > args.sample_size:
+            examples = examples.sample(n=args.sample_size, random_state=bundle.prepared.config.seed).sort_values("example_id")
+        candidates = core.generate_candidate_union(
+            bundle.prepared,
+            bundle.split_artifacts,
+            bundle.retrievers,
+            examples,
+            top_k=bundle.prepared.config.candidate_union_top_k,
+            inject_target_if_missing=False,
+            include_candidate_sources=True,
+        )
+        union_diagnostics = core.candidate_recall_diagnostics(
+            candidates,
+            split=args.split,
+            variant="hybrid_union",
+            stage="candidate_union",
+        )
+        pruned = (
+            candidates.sort_values(["example_id", "retrieval_score"], ascending=[True, False])
+            .groupby("example_id", group_keys=False)
+            .head(bundle.prepared.config.ranker_candidate_top_k)
+            .reset_index(drop=True)
+        )
+        pruned_diagnostics = core.candidate_recall_diagnostics(
+            pruned,
+            split=args.split,
+            variant="hybrid_union",
+            stage="ranker_candidates",
+        )
+        payload = {
+            "bundle_version": manifest.version,
+            "split": args.split,
+            "examples": int(len(examples)),
+            "candidate_rows": int(len(candidates)),
+            "ranker_candidate_rows": int(len(pruned)),
+            "candidate_union": union_diagnostics.to_dict(orient="records"),
+            "ranker_candidates": pruned_diagnostics.to_dict(orient="records"),
+        }
+        print(json.dumps(payload, indent=2, default=str))
         return 0
 
     if args.command == "serve":

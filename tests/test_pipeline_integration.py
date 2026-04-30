@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
 from amazon_recsys.api.app import create_app
 from amazon_recsys.ml import core
+from amazon_recsys.ml.pipelines import pipeline_config_from_settings
 
 
 @pytest.mark.slow
@@ -25,12 +27,21 @@ def test_training_bundle_round_trip(test_container, train_export_activate) -> No
     model = test_container.recommendation_service.get_active_model()
     summary = test_container.recommendation_service.get_evaluation_summary()
     bundle_dir = Path(bundle.manifest.bundle_dir)
+    loaded_bundle = test_container.artifact_store.load_bundle(bundle.manifest)
 
     assert bundle.pointer is not None
     assert bundle.pointer.version == "fixture-bundle"
     assert bundle.manifest.bundle_format == "onnx"
     assert Path(bundle.manifest.runtime_bundle_path).name == "runtime_bundle.json"
+    assert loaded_bundle.serving_index is not None
+    assert not loaded_bundle.serving_index.user_summary.empty
+    assert not loaded_bundle.serving_index.user_history.empty
+    assert loaded_bundle.prepared.interactions.empty
+    assert loaded_bundle.prepared.hard_negatives.empty
     assert (bundle_dir / "models" / "ranker.onnx").exists()
+    assert (bundle_dir / "data" / "serving_user_summary.parquet").exists()
+    assert (bundle_dir / "data" / "serving_user_history.parquet").exists()
+    assert (bundle_dir / "data" / "serving_state.json").exists()
     assert not list(bundle_dir.rglob("*.pkl"))
     assert bundle.session.pipeline_config.__class__.__module__ == "amazon_recsys.ml.core"
     assert bundle.session.prepared.__class__.__module__ == "amazon_recsys.ml.core"
@@ -56,6 +67,44 @@ def test_training_bundle_round_trip(test_container, train_export_activate) -> No
     assert "available-users" in page_response.text
     assert 'data-filter-table="qa-results"' in page_response.text
     assert 'data-filter-table="analysis-users"' in page_response.text
+
+
+@pytest.mark.retrieval
+def test_candidate_recall_diagnostics_break_down_categories_and_sources() -> None:
+    candidates = pd.DataFrame(
+        [
+            {"example_id": 1, "label": 1, "rank": 1, "target_source_category": "Automotive", "from_cooccurrence": 1, "from_latent_cf": 0},
+            {"example_id": 1, "label": 0, "rank": 2, "target_source_category": "Automotive", "from_cooccurrence": 0, "from_latent_cf": 1},
+            {"example_id": 2, "label": 0, "rank": 1, "target_source_category": "All_Beauty", "from_cooccurrence": 1, "from_latent_cf": 0},
+        ]
+    )
+
+    diagnostics = core.candidate_recall_diagnostics(
+        candidates,
+        split="test",
+        variant="hybrid_union",
+        stage="candidate_union",
+    )
+
+    by_scope = {(row["scope"], row["name"]): row for row in diagnostics.to_dict(orient="records")}
+    assert by_scope[("overall", "all")]["hit_rate"] == pytest.approx(0.5)
+    assert by_scope[("target_category", "Automotive")]["hit_rate"] == pytest.approx(1.0)
+    assert by_scope[("target_category", "All_Beauty")]["hit_rate"] == pytest.approx(0.0)
+    assert by_scope[("candidate_source", "cooccurrence")]["positive_recoveries"] == 1
+
+
+@pytest.mark.retrieval
+def test_quality_profile_raises_debug_sized_candidate_budgets(test_settings, caplog) -> None:
+    settings = test_settings.model_copy(update={"run_profile": "quality"})
+
+    with caplog.at_level("WARNING"):
+        config = pipeline_config_from_settings(settings)
+
+    assert config.candidate_union_top_k == 200
+    assert config.ranker_candidate_top_k == 100
+    assert config.cooccurrence_candidate_k == 100
+    assert config.latent_cf_candidate_k == 150
+    assert "Candidate budget settings were below the quality profile floor" in caplog.text
 
 
 @pytest.mark.retrieval

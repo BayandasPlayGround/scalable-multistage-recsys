@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, TypeAlias
 
 if TYPE_CHECKING:
-    from amazon_recsys.ml.core import PipelineConfig, PreparedArtifacts, RankerArtifacts, RetrieverArtifacts, SplitArtifacts
+    from amazon_recsys.ml.core import PipelineConfig, PreparedArtifacts, RankerArtifacts, RetrieverArtifacts, ServingIndex, SplitArtifacts
 
 
 JSONValue: TypeAlias = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
@@ -254,6 +254,7 @@ class RuntimeBundle:
     split_artifacts: SplitArtifacts | None = None
     retrievers: dict[str, RetrieverArtifacts] = field(default_factory=dict)
     ranker: RankerArtifacts | None = None
+    serving_index: ServingIndex | None = None
     evaluation_summary: EvaluationSummary = field(default_factory=EvaluationSummary)
     is_mock: bool = False
 

@@ -115,12 +115,13 @@ Use `train` when you only want metrics and cached model artifacts. Use `evaluate
 
 ### Run Profiles
 
-`AMAZON_RECSYS_RUN_PROFILE` and `--run-profile` accept three values:
+`AMAZON_RECSYS_RUN_PROFILE` and `--run-profile` accept four values:
 
 | Profile | Best for | Data and compute behavior |
 | --- | --- | --- |
 | `debug` | Local smoke tests and quick iteration | Reads up to `100000` review rows per category, disables the neural retriever, caps retriever training at `40000` examples, caps ranker training at `2000` examples, and evaluates up to `1000` users. |
 | `quality` | Stronger offline experiments on CPU | Uses the full configured review files, disables the neural retriever by default, caps retriever training at `100000` examples, caps ranker training at `5000` examples, and evaluates up to `2000` users. |
+| `quality-neural` | Optional neural retrieval experiment | Uses the quality-sized data and caps, but enables the TensorFlow two-tower retriever for candidate-recovery experiments. |
 | `full` | Heavier production-style experiments | Uses the full configured review files, enables the neural retriever, removes the retriever training cap, caps ranker training at `50000` examples, and removes the evaluation user cap. |
 
 Profile defaults are applied only when the corresponding internal `PipelineConfig` value is still at its package default. Settings exposed through `.env`, such as ranker caps and candidate sizes, can still override many of the runtime limits.
@@ -242,6 +243,12 @@ These settings do not directly change how many raw rows are read, but they mater
 | `AMAZON_RECSYS_RANKER_CANDIDATE_TOP_K` | Number of candidates considered by the ranker per example. |
 | `AMAZON_RECSYS_RANKER_NEGATIVES_PER_POSITIVE` | Negative sampling ratio for ranker training. Higher values can improve discrimination but increase training cost. |
 | `AMAZON_RECSYS_RANKER_BACKEND` | `xgboost` by default. `dlrm` is available as an experimental TensorFlow backend. |
+
+Candidate recovery can be inspected on an exported bundle without retraining:
+
+```powershell
+python -m amazon_recsys.cli.main diagnose-candidates --bundle-version active --split test --sample-size 500
+```
 
 The XGBoost ranker is controlled by:
 

@@ -77,7 +77,55 @@ def pipeline_config_from_settings(settings: AppSettings) -> core.PipelineConfig:
         xgb_subsample=settings.ranking.xgb_subsample,
         xgb_colsample_bytree=settings.ranking.xgb_colsample_bytree,
     )
-    return core.apply_run_profile(config)
+    config = core.apply_run_profile(config)
+    _enforce_profile_candidate_budget_floor(config)
+    return config
+
+
+def _enforce_profile_candidate_budget_floor(config: core.PipelineConfig) -> None:
+    floors_by_profile = {
+        "quality": {
+            "candidate_union_top_k": 200,
+            "ranker_candidate_top_k": 100,
+            "cooccurrence_candidate_k": 100,
+            "latent_cf_candidate_k": 150,
+            "content_candidate_k": 100,
+            "popularity_backfill_k": 50,
+        },
+        "quality-neural": {
+            "candidate_union_top_k": 200,
+            "ranker_candidate_top_k": 100,
+            "cooccurrence_candidate_k": 100,
+            "latent_cf_candidate_k": 150,
+            "content_candidate_k": 100,
+            "neural_candidate_k": 150,
+            "popularity_backfill_k": 50,
+        },
+        "full": {
+            "candidate_union_top_k": 300,
+            "ranker_candidate_top_k": 200,
+            "cooccurrence_candidate_k": 100,
+            "latent_cf_candidate_k": 150,
+            "content_candidate_k": 100,
+            "neural_candidate_k": 150,
+            "popularity_backfill_k": 50,
+        },
+    }
+    floors = floors_by_profile.get(config.run_profile)
+    if not floors:
+        return
+    raised: list[str] = []
+    for field_name, minimum_value in floors.items():
+        current_value = int(getattr(config, field_name))
+        if current_value < minimum_value:
+            setattr(config, field_name, minimum_value)
+            raised.append(f"{field_name}={current_value}->{minimum_value}")
+    if raised:
+        LOGGER.warning(
+            "Candidate budget settings were below the %s profile floor and were raised: %s",
+            config.run_profile,
+            ", ".join(raised),
+        )
 
 
 @dataclass
