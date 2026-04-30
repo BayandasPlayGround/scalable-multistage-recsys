@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
 from amazon_recsys.api.app import create_app
+from amazon_recsys.ml import bundles
 from amazon_recsys.ml import core
 from amazon_recsys.ml.pipelines import pipeline_config_from_settings
 
@@ -91,6 +93,61 @@ def test_candidate_recall_diagnostics_break_down_categories_and_sources() -> Non
     assert by_scope[("target_category", "Automotive")]["hit_rate"] == pytest.approx(1.0)
     assert by_scope[("target_category", "All_Beauty")]["hit_rate"] == pytest.approx(0.0)
     assert by_scope[("candidate_source", "cooccurrence")]["positive_recoveries"] == 1
+
+
+@pytest.mark.retrieval
+def test_two_tower_vector_serving_query_uses_history_embedding_mean() -> None:
+    retriever = SimpleNamespace(
+        variant="two_tower",
+        item_embeddings=np.asarray(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+        metadata={},
+    )
+    examples = pd.DataFrame([{"history_item_idxs": [1, 3]}])
+
+    query = core._vector_retriever_queries(SimpleNamespace(), retriever, examples)
+    expected = np.asarray([[1.0, 0.5]], dtype=np.float32)
+    expected = expected / np.linalg.norm(expected, axis=1, keepdims=True)
+
+    np.testing.assert_allclose(query, expected, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.retrieval
+def test_neural_retriever_is_sanitized_for_portable_export(workspace_dir: Path) -> None:
+    ann_index_path = workspace_dir / "two_tower.ann"
+    ann_index_path.write_text("placeholder", encoding="utf-8")
+    retriever = SimpleNamespace(
+        variant="two_tower",
+        retriever_kind="neural",
+        ann_index=None,
+        ann_index_path=ann_index_path,
+        item_embeddings=np.asarray([[1.0, 0.0]], dtype=np.float32),
+        item_encoder=object(),
+        user_encoder=object(),
+        model=object(),
+        metadata={},
+    )
+    session = SimpleNamespace(
+        prepared=SimpleNamespace(item_text_matrix=np.asarray([[1.0]], dtype=np.float32)),
+        split_artifacts=object(),
+        retrievers={"two_tower": retriever},
+        ranker=SimpleNamespace(backend="xgboost"),
+    )
+
+    _, _, sanitized_retrievers, _ = bundles._sanitize_runtime_objects(session)
+    sanitized = sanitized_retrievers["two_tower"]
+
+    assert sanitized.retriever_kind == "vector"
+    assert sanitized.user_encoder is None
+    assert sanitized.item_encoder is None
+    assert sanitized.model["serving_query"] == "history_item_embedding_mean"
+    assert sanitized.metadata["exported_from_retriever_kind"] == "neural"
 
 
 @pytest.mark.retrieval

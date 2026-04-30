@@ -2491,6 +2491,16 @@ def _vector_retriever_queries(
                     vector = np.zeros((retriever.item_embeddings.shape[1],), dtype=np.float32)
             query_vectors.append(vector.astype(np.float32, copy=False))
         return _normalize_rows(np.stack(query_vectors).astype(np.float32))
+    if retriever.variant in {"two_tower", "dat_lite"}:
+        query_vectors = []
+        for row in examples.itertuples(index=False):
+            history = list(getattr(row, "history_item_idxs"))
+            if history:
+                vector = np.mean(retriever.item_embeddings[np.asarray(history, dtype=np.int32) - 1], axis=0)
+            else:
+                vector = np.zeros((retriever.item_embeddings.shape[1],), dtype=np.float32)
+            query_vectors.append(vector.astype(np.float32, copy=False))
+        return _normalize_rows(np.stack(query_vectors).astype(np.float32))
     raise ValueError(f"Unsupported vector retriever variant: {retriever.variant}")
 
 

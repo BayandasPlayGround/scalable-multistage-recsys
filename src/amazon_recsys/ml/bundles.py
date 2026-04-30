@@ -73,7 +73,20 @@ def _sanitize_runtime_objects(
     for retriever in retrievers.values():
         retriever.ann_index = None
         if getattr(retriever, "retriever_kind", "vector") != "vector":
-            raise ValueError("ONNX bundle export currently supports classical/vector retrievers only.")
+            if retriever.ann_index_path is None or retriever.item_embeddings is None:
+                raise ValueError(
+                    f"Retriever {retriever.variant!r} cannot be exported because it has no portable ANN state."
+                )
+            retriever.item_encoder = None
+            retriever.user_encoder = None
+            retriever.model = {
+                "retriever": retriever.variant,
+                "serving_query": "history_item_embedding_mean",
+                "exported_from_retriever_kind": retriever.retriever_kind,
+            }
+            retriever.metadata["exported_from_retriever_kind"] = retriever.retriever_kind
+            retriever.metadata["serving_query"] = "history_item_embedding_mean"
+            retriever.retriever_kind = "vector"
 
     ranker = session.ranker
     if getattr(ranker, "backend", "xgboost") != "xgboost":
