@@ -13,6 +13,12 @@ Amazon RecSys is a package-owned multi-stage recommender built on Amazon review 
 - logs training and monitoring runs to MLflow when enabled
 - computes batch feature drift and concept drift from served inference logs and delayed outcomes
 
+## Project Learnings
+
+This project’s biggest lesson is that recommender quality is usually won or lost before the ranker ever sees a row. The low offline hit rate from the quality bundle made it clear that XGBoost tuning was not the next high-leverage move; candidate recovery, source balance, category-aware backfill, and retrieval diagnostics mattered more. The slow and low-recall neural retriever experiment also sharpened the operating rule for this repo: neural retrieval is useful only when it independently improves candidate recall under the available compute, so it stays behind explicit experiment profiles instead of becoming the default path.
+
+The second major lesson is operational: a recommender becomes trustworthy only when training artifacts, serving latency, and monitoring semantics are treated as one system. The project moved from notebook-driven modeling into versioned bundles, serving indexes, MLflow lineage, drift dashboards, synthetic-outcome safeguards, and diagnostics that separate feature drift from true concept degradation. That work exposed practical production concerns: avoid serving-time scans over full interaction tables, make readiness checks manifest-based, interpret small monitoring windows cautiously, and build enough observability to know whether a quality issue is caused by retrieval, ranking, traffic mix, or delayed outcomes.
+
 ## Quick Start
 
 ```powershell
