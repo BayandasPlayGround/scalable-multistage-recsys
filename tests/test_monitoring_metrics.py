@@ -74,6 +74,49 @@ def test_feature_drifts_raise_alerts_for_large_distribution_shifts() -> None:
     assert by_name["served_category_mix"].current_value["comparison_categories"]
 
 
+def test_history_length_profile_counts_values_above_reference_range() -> None:
+    reference_profile = ReferenceProfile(
+        bundle_version="bundle-1",
+        created_at="2026-04-15T00:00:00+00:00",
+        monitored_k=10,
+        numeric_features={
+            "request_history_length": numeric_profile(
+                pd.Series([3, 4, 5, 8, 10]),
+                bin_edges=[0.0, 1.0, 3.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 1000.0],
+            )
+        },
+        categorical_features={},
+        offline_metrics={},
+        sample_size=5,
+    )
+    monitoring = MonitoringConfig(enabled=True, monitoring_root=Path("."), psi_warn=0.10, psi_alert=0.25)
+    inference_frame = pd.DataFrame(
+        [
+            {
+                "request_id": f"req-{index}",
+                "rank": 1,
+                "request_history_length": 120,
+                "is_known_user": True,
+                "unseen_user": False,
+                "unseen_history_item_rate": 0.0,
+                "source_category": "Automotive",
+                "price": 10.0,
+                "average_rating": 4.5,
+                "score": 0.0,
+                "candidate_sources": "cooccurrence",
+                "popularity_value": 1.0,
+            }
+            for index in range(5)
+        ]
+    )
+
+    results = compute_feature_drifts(reference_profile, inference_frame, monitoring)
+    history = {result.feature_name: result for result in results}["request_history_length"]
+
+    assert history.current_value["proportions"][-2] == pytest.approx(1.0)
+    assert history.status == "alert"
+
+
 def test_concept_drift_requires_consecutive_degraded_windows_for_alert() -> None:
     reference_profile = ReferenceProfile(
         bundle_version="bundle-1",
@@ -155,3 +198,52 @@ def test_concept_drift_requires_consecutive_degraded_windows_for_alert() -> None
     assert result.sample_size == 2
     assert result.performance_drop == pytest.approx(1.0)
     assert result.consecutive_degraded_windows == 2
+
+
+def test_concept_drift_marks_synthetic_outcomes_as_insufficient() -> None:
+    reference_profile = ReferenceProfile(
+        bundle_version="bundle-1",
+        created_at="2026-04-15T00:00:00+00:00",
+        monitored_k=10,
+        numeric_features={},
+        categorical_features={},
+        offline_metrics={
+            "hit_rate_at_10": 0.5,
+            "ndcg_at_10": 0.5,
+            "mrr_at_10": 0.5,
+            "purchase_rate_at_10": None,
+        },
+        sample_size=10,
+    )
+    monitoring = MonitoringConfig(enabled=True, monitoring_root=Path("."), min_events_per_window=1)
+    inference_frame = pd.DataFrame(
+        [
+            {
+                "request_id": "req-1",
+                "user_key": "user-1",
+                "item_id": "A1",
+                "rank": 1,
+                "requested_at": "2026-04-15T00:00:00+00:00",
+                "query_mode": "known_user",
+            }
+        ]
+    )
+    outcomes = pd.DataFrame(
+        [
+            {
+                "occurred_at": "2026-04-15T00:01:00+00:00",
+                "user_key": "user-1",
+                "item_id": "A1",
+                "event_type": "purchase",
+                "rating": 5.0,
+                "source": "synthetic_inference_replay",
+            }
+        ]
+    )
+
+    result = compute_concept_drift(reference_profile, inference_frame, outcomes, monitoring, monitored_k=10)
+
+    assert result.metrics["hit_rate_at_10"] == pytest.approx(1.0)
+    assert result.status == "insufficient_data"
+    assert result.notes["synthetic_outcomes"] is True
+    assert result.notes["metrics_are_decisionable"] is False

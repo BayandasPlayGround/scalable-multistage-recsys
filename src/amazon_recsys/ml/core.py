@@ -106,6 +106,8 @@ class PipelineConfig:
     content_candidate_k: int = 100
     neural_candidate_k: int = 150
     popularity_backfill_k: int = 50
+    category_backfill_enabled: bool = True
+    recency_cooccurrence_enabled: bool = True
     candidate_union_top_k: int = 300
     ranker_candidate_top_k: int = 200
     ranker_train_example_cap: int = 2_000
@@ -313,6 +315,8 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "retriever_train_example_cap": 40_000,
             "retriever_quality_min_history": 2,
             "enable_neural_retriever": False,
+            "category_backfill_enabled": True,
+            "recency_cooccurrence_enabled": True,
             "eval_user_cap": 1_000,
             "candidate_union_top_k": 200,
             "candidate_union_batch_size": 300,
@@ -326,6 +330,8 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "retriever_train_example_cap": 100_000,
             "retriever_quality_min_history": 3,
             "enable_neural_retriever": False,
+            "category_backfill_enabled": True,
+            "recency_cooccurrence_enabled": True,
             "eval_user_cap": 2_000,
             "candidate_union_top_k": 200,
             "candidate_union_batch_size": 500,
@@ -339,6 +345,8 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "retriever_train_example_cap": 100_000,
             "retriever_quality_min_history": 3,
             "enable_neural_retriever": True,
+            "category_backfill_enabled": True,
+            "recency_cooccurrence_enabled": True,
             "eval_user_cap": 2_000,
             "candidate_union_top_k": 200,
             "candidate_union_batch_size": 500,
@@ -352,6 +360,8 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "retriever_train_example_cap": None,
             "retriever_quality_min_history": 3,
             "enable_neural_retriever": True,
+            "category_backfill_enabled": True,
+            "recency_cooccurrence_enabled": True,
             "eval_user_cap": None,
             "candidate_union_top_k": 300,
             "candidate_union_batch_size": 1_000,
@@ -2191,51 +2201,60 @@ def popularity_by_category_candidates(
     global_counter = split_artifacts.train_item_popularity
     for _, example in examples.iterrows():
         seen_items = set(example["history_item_idxs"])
-        category_preferences = {
-            category: max(float(example[f"pref_{category}"]), 0.0)
-            for category in split_artifacts.config.categories
-        }
-        positive_preferences = [(category, value) for category, value in category_preferences.items() if value > 0.0]
-        if not positive_preferences:
-            positive_preferences = [(category, 1.0) for category in split_artifacts.config.categories]
-        preference_total = sum(value for _, value in positive_preferences) or float(len(positive_preferences))
-        raw_allocations = [
-            (category, (value / preference_total) * top_k)
-            for category, value in sorted(positive_preferences, key=lambda item: (-item[1], item[0]))
-        ]
-        allocations = {category: int(math.floor(raw_value)) for category, raw_value in raw_allocations}
-        for category, _ in raw_allocations:
-            allocations[category] = max(1, allocations[category])
-        remainder = top_k - sum(allocations.values())
-        if remainder > 0:
-            ranked_remainders = sorted(
-                raw_allocations,
-                key=lambda item: (-(item[1] - math.floor(item[1])), item[0]),
-            )
-            for index in range(remainder):
-                allocations[ranked_remainders[index % len(ranked_remainders)][0]] += 1
-        elif remainder < 0:
-            for category, _ in sorted(raw_allocations, key=lambda item: (item[1] - math.floor(item[1]), item[0])):
-                if remainder == 0:
-                    break
-                removable = min(allocations[category] - 1, abs(remainder))
-                if removable > 0:
-                    allocations[category] -= removable
-                    remainder += removable
+        if not split_artifacts.config.category_backfill_enabled:
+            selected_items = _top_items_from_counter(global_counter, seen_items, top_k)
+        else:
+            category_preferences = {
+                category: max(float(example[f"pref_{category}"]), 0.0)
+                for category in split_artifacts.config.categories
+            }
+            positive_preferences = [(category, value) for category, value in category_preferences.items() if value > 0.0]
+            if not positive_preferences:
+                positive_preferences = [(category, 1.0) for category in split_artifacts.config.categories]
+            preference_total = sum(value for _, value in positive_preferences) or float(len(positive_preferences))
+            global_reserve = min(max(int(round(top_k * 0.20)), 1), max(top_k - len(positive_preferences), 0)) if top_k > 1 else 0
+            category_budget = max(top_k - global_reserve, 0)
+            raw_allocations = [
+                (category, (value / preference_total) * category_budget)
+                for category, value in sorted(positive_preferences, key=lambda item: (-item[1], item[0]))
+            ]
+            allocations = {category: int(math.floor(raw_value)) for category, raw_value in raw_allocations}
+            for category, _ in raw_allocations:
+                allocations[category] = max(1, allocations[category])
+            remainder = category_budget - sum(allocations.values())
+            if remainder > 0 and raw_allocations:
+                ranked_remainders = sorted(
+                    raw_allocations,
+                    key=lambda item: (-(item[1] - math.floor(item[1])), item[0]),
+                )
+                for index in range(remainder):
+                    allocations[ranked_remainders[index % len(ranked_remainders)][0]] += 1
+            elif remainder < 0:
+                for category, _ in sorted(raw_allocations, key=lambda item: (item[1] - math.floor(item[1]), item[0])):
+                    if remainder == 0:
+                        break
+                    removable = min(allocations[category] - 1, abs(remainder))
+                    if removable > 0:
+                        allocations[category] -= removable
+                        remainder += removable
 
-        category_candidates: list[int] = []
-        selected = set(seen_items)
-        for category, _ in raw_allocations:
-            quota = allocations.get(category, 0)
-            if quota <= 0:
-                continue
-            candidates = _top_items_from_counter(split_artifacts.category_item_popularity.get(category, Counter()), selected, quota)
-            category_candidates.extend(candidates)
-            selected.update(candidates)
-        if len(category_candidates) < top_k:
-            fallback = _top_items_from_counter(global_counter, selected, top_k - len(category_candidates))
-            category_candidates.extend(fallback)
-        for rank, item_idx in enumerate(category_candidates[:top_k], start=1):
+            selected_items: list[int] = []
+            selected = set(seen_items)
+            for category, _ in raw_allocations:
+                quota = allocations.get(category, 0)
+                if quota <= 0:
+                    continue
+                candidates = _top_items_from_counter(split_artifacts.category_item_popularity.get(category, Counter()), selected, quota)
+                selected_items.extend(candidates)
+                selected.update(candidates)
+            if len(selected_items) < category_budget:
+                fallback = _top_items_from_counter(global_counter, selected, category_budget - len(selected_items))
+                selected_items.extend(fallback)
+                selected.update(fallback)
+            if len(selected_items) < top_k:
+                fallback = _top_items_from_counter(global_counter, selected, top_k - len(selected_items))
+                selected_items.extend(fallback)
+        for rank, item_idx in enumerate(selected_items[:top_k], start=1):
             rows.append(
                 {
                     "example_id": int(example["example_id"]),
@@ -2260,8 +2279,16 @@ def item_item_cooccurrence_candidates(
     for _, example in examples.iterrows():
         seen_items = set(example["history_item_idxs"])
         score_counter: Counter = Counter()
-        for history_item in example["history_item_idxs"]:
-            score_counter.update(split_artifacts.cooccurrence.get(int(history_item), Counter()))
+        history_items = list(example["history_item_idxs"])
+        history_count = max(len(history_items), 1)
+        for position, history_item in enumerate(history_items):
+            neighbors = split_artifacts.cooccurrence.get(int(history_item), Counter())
+            if not split_artifacts.config.recency_cooccurrence_enabled:
+                score_counter.update(neighbors)
+                continue
+            recency_weight = float((position + 1) / history_count)
+            for candidate_idx, count in neighbors.items():
+                score_counter[int(candidate_idx)] += float(count) * recency_weight
         candidates = [item_idx for item_idx, _ in score_counter.most_common() if item_idx not in seen_items][:top_k]
         if len(candidates) < top_k:
             fallback = _top_items_from_counter(split_artifacts.train_item_popularity, seen_items.union(candidates), top_k - len(candidates))
@@ -2348,6 +2375,7 @@ def _ann_candidates_from_vectors(
                     "target_parent_asin": example["target_parent_asin"],
                     "target_timestamp": example["target_timestamp"],
                     "target_source_category": example.get("target_source_category", ""),
+                    "history_length": int(example.get("history_length", len(example["history_item_idxs"]))),
                     "item_idx": int(item_idx),
                     "retrieval_score": float(score),
                     "rank": rank,
@@ -2582,6 +2610,7 @@ def generate_candidates(
                     "target_parent_asin": example["target_parent_asin"],
                     "target_timestamp": example["target_timestamp"],
                     "target_source_category": example.get("target_source_category", ""),
+                    "history_length": int(example.get("history_length", len(example["history_item_idxs"]))),
                     "item_idx": int(item_idx),
                     "retrieval_score": float(score),
                     "rank": rank,
@@ -2671,14 +2700,15 @@ def evaluate_retriever(
         metrics["split"] = split_name
         metrics["variant"] = retriever.variant
         eval_frames.append(metrics)
+        candidates_with_context = _add_candidate_item_context(prepared, candidates)
         diagnostics = candidate_recall_diagnostics(
-            candidates,
+            candidates_with_context,
             split=split_name,
             variant=retriever.variant,
             stage="retriever",
         )
         diagnostics.to_csv(prepared.config.eval_dir / f"{retriever.variant}_{split_name}_candidate_diagnostics_metrics.csv", index=False)
-        candidates.to_parquet(prepared.config.eval_dir / f"{retriever.variant}_{split_name}_retrieval_candidates.parquet", index=False)
+        candidates_with_context.to_parquet(prepared.config.eval_dir / f"{retriever.variant}_{split_name}_retrieval_candidates.parquet", index=False)
     if not eval_frames:
         return _normalize_metrics_frame(None)
     return _normalize_metrics_frame(pd.concat(eval_frames, ignore_index=True))
@@ -2855,11 +2885,24 @@ def train_retrievers(prepared: PreparedArtifacts, split_artifacts: SplitArtifact
     LOGGER.info("Latent collaborative-filtering retriever complete")
     if prepared.config.enable_neural_retriever:
         LOGGER.info("Training neural two-tower retriever")
-        retrievers["two_tower"] = train_retriever(prepared, split_artifacts, variant="two_tower")
-        LOGGER.info("Neural two-tower retriever complete")
+        neural_retriever = train_retriever(prepared, split_artifacts, variant="two_tower")
+        if _retriever_recovers_positives(neural_retriever.metrics):
+            retrievers["two_tower"] = neural_retriever
+            LOGGER.info("Neural two-tower retriever complete and enabled for candidate union")
+        else:
+            LOGGER.warning(
+                "Neural two-tower retriever completed but recovered no positives in evaluation. "
+                "It will be logged for diagnostics but excluded from candidate union."
+            )
     else:
         LOGGER.info("Skipping two_tower retriever because enable_neural_retriever is false")
     return retrievers
+
+
+def _retriever_recovers_positives(metrics: pd.DataFrame) -> bool:
+    if metrics.empty or "recall" not in metrics.columns:
+        return False
+    return bool(pd.to_numeric(metrics["recall"], errors="coerce").fillna(0.0).max() > 0.0)
 
 
 def _candidate_source_budgets(config: PipelineConfig) -> dict[str, int]:
@@ -2884,6 +2927,7 @@ def _empty_candidate_frame() -> pd.DataFrame:
             "target_parent_asin",
             "target_timestamp",
             "target_source_category",
+            "history_length",
             "item_idx",
             "retrieval_score",
             "rank",
@@ -3004,6 +3048,7 @@ def _candidate_metadata_from_example(example: pd.Series) -> Record:
         "target_timestamp": example["target_timestamp"],
         "target_source_category": example["target_source_category"],
         "user_interaction_count": float(example["user_interaction_count"]),
+        "history_length": int(example["history_length"]) if "history_length" in example.index else len(example["history_item_idxs"]),
         "user_mean_rating": float(example["user_mean_rating"]),
         "user_verified_rate": float(example["user_verified_rate"]),
         "days_since_last": float(example["days_since_last"]),
@@ -3275,6 +3320,46 @@ def candidate_recall_diagnostics(
                     "median_positive_rank": float(positives["rank"].median()) if not positives.empty and "rank" in positives.columns else np.nan,
                 }
             )
+    if "history_length" in candidates.columns:
+        enriched = candidates.copy()
+        enriched["history_length_bucket"] = enriched["history_length"].map(_history_length_bucket)
+        history_hits = enriched.groupby(["history_length_bucket", "example_id"], as_index=False)["label"].max()
+        positive_with_bucket = enriched[enriched["label"] == 1]
+        for bucket, group in history_hits.groupby("history_length_bucket", sort=True):
+            positives = positive_with_bucket[positive_with_bucket["history_length_bucket"] == bucket]
+            rows.append(
+                {
+                    "split": split,
+                    "variant": variant,
+                    "stage": stage,
+                    "scope": "history_length_bucket",
+                    "name": str(bucket),
+                    "examples": int(len(group)),
+                    "hit_rate": float(group["label"].mean()) if not group.empty else 0.0,
+                    "positive_recoveries": int(len(positives)),
+                    "examples_with_positive": int(positives["example_id"].nunique()) if not positives.empty else 0,
+                    "median_positive_rank": float(positives["rank"].median()) if not positives.empty and "rank" in positives.columns else np.nan,
+                }
+            )
+    if "target_price_bucket" in candidates.columns:
+        price_hits = candidates.groupby(["target_price_bucket", "example_id"], as_index=False)["label"].max()
+        positive_with_price = positive_rows[positive_rows["target_price_bucket"].notna()] if "target_price_bucket" in positive_rows.columns else pd.DataFrame()
+        for bucket, group in price_hits.groupby("target_price_bucket", sort=True):
+            positives = positive_with_price[positive_with_price["target_price_bucket"] == bucket]
+            rows.append(
+                {
+                    "split": split,
+                    "variant": variant,
+                    "stage": stage,
+                    "scope": "target_price_bucket",
+                    "name": str(bucket),
+                    "examples": int(len(group)),
+                    "hit_rate": float(group["label"].mean()) if not group.empty else 0.0,
+                    "positive_recoveries": int(len(positives)),
+                    "examples_with_positive": int(positives["example_id"].nunique()) if not positives.empty else 0,
+                    "median_positive_rank": float(positives["rank"].median()) if not positives.empty and "rank" in positives.columns else np.nan,
+                }
+            )
     source_names = ["cooccurrence", "latent_cf", "content_based", "two_tower", "popularity"]
     if any(f"from_{source_name}" in candidates.columns for source_name in source_names):
         for source_name in source_names:
@@ -3314,6 +3399,140 @@ def candidate_recall_diagnostics(
                     "median_positive_rank": float(source_positive["rank"].median()) if not source_positive.empty and "rank" in source_positive.columns else np.nan,
                 }
             )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _history_length_bucket(value: object) -> str:
+    length = int(pd.to_numeric(pd.Series([value]), errors="coerce").fillna(0).iloc[0])
+    if length <= 2:
+        return "01-02"
+    if length <= 5:
+        return "03-05"
+    if length <= 10:
+        return "06-10"
+    if length <= 25:
+        return "11-25"
+    if length <= 50:
+        return "26-50"
+    return "51+"
+
+
+def _price_bucket_labels(edges: np.ndarray) -> list[str]:
+    labels: list[str] = []
+    for index in range(max(len(edges) - 1, 0)):
+        if index == 0:
+            labels.append("price_low")
+        elif index == len(edges) - 2:
+            labels.append("price_very_high")
+        elif index == 1:
+            labels.append("price_medium")
+        else:
+            labels.append("price_high")
+    return labels
+
+
+def _item_price_buckets(item_prices: pd.Series) -> tuple[np.ndarray, list[str]]:
+    prices = pd.to_numeric(item_prices, errors="coerce").dropna().astype(float)
+    if prices.empty:
+        return np.asarray([-np.inf, np.inf], dtype=float), ["price_unknown"]
+    if prices.nunique() == 1:
+        value = float(prices.iloc[0])
+        return np.asarray([-np.inf, value, np.inf], dtype=float), ["price_at_or_below_reference", "price_above_reference"]
+    edges = np.quantile(prices.to_numpy(dtype=float), [0.0, 0.25, 0.5, 0.75, 1.0]).astype(float)
+    edges = np.unique(edges)
+    if len(edges) < 2:
+        edges = np.asarray([float(prices.min()) - 0.5, float(prices.max()) + 0.5], dtype=float)
+    edges[0] = -np.inf
+    edges[-1] = np.inf
+    return edges, _price_bucket_labels(edges)
+
+
+def _assign_price_bucket(values: pd.Series, edges: np.ndarray, labels: list[str]) -> pd.Series:
+    if len(labels) != len(edges) - 1:
+        labels = [f"price_bucket_{index + 1}" for index in range(len(edges) - 1)]
+    buckets = pd.cut(pd.to_numeric(values, errors="coerce"), bins=edges, labels=labels, include_lowest=True)
+    return buckets.astype("string").fillna("price_unknown")
+
+
+def _add_candidate_item_context(prepared: PreparedArtifacts, candidates: pd.DataFrame) -> pd.DataFrame:
+    if candidates.empty:
+        return candidates.copy()
+    enriched = candidates.copy()
+    item_context = prepared.item_features[["item_idx", "source_category", "price"]].copy()
+    item_context["item_idx"] = item_context["item_idx"].astype(int)
+    edges, labels = _item_price_buckets(item_context["price"])
+    candidate_context = item_context.rename(
+        columns={
+            "source_category": "item_source_category",
+            "price": "item_price",
+        }
+    )
+    candidate_context["item_price_bucket"] = _assign_price_bucket(candidate_context["item_price"], edges, labels)
+    target_context = item_context.rename(
+        columns={
+            "item_idx": "target_item_idx",
+            "source_category": "resolved_target_source_category",
+            "price": "target_price",
+        }
+    )
+    target_context["target_price_bucket"] = _assign_price_bucket(target_context["target_price"], edges, labels)
+    enriched = enriched.merge(candidate_context, on="item_idx", how="left")
+    enriched = enriched.merge(target_context, on="target_item_idx", how="left")
+    if "target_source_category" not in enriched.columns:
+        enriched["target_source_category"] = enriched["resolved_target_source_category"]
+    else:
+        enriched["target_source_category"] = enriched["target_source_category"].fillna(enriched["resolved_target_source_category"])
+    return enriched
+
+
+def candidate_distribution_by_category_price(
+    candidates: pd.DataFrame,
+    *,
+    split: str,
+    variant: str,
+    stage: str,
+    top_k: int = 10,
+) -> pd.DataFrame:
+    columns = [
+        "split",
+        "variant",
+        "stage",
+        "top_k",
+        "source_category",
+        "price_bucket",
+        "rows",
+        "proportion",
+        "mean_rank",
+        "positive_rows",
+    ]
+    if candidates.empty or "rank" not in candidates.columns:
+        return pd.DataFrame(columns=columns)
+    frame = candidates[candidates["rank"].astype(int) <= int(top_k)].copy()
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    category_col = "item_source_category" if "item_source_category" in frame.columns else "target_source_category"
+    price_col = "item_price_bucket" if "item_price_bucket" in frame.columns else "target_price_bucket"
+    if category_col not in frame.columns or price_col not in frame.columns:
+        return pd.DataFrame(columns=columns)
+    frame[category_col] = frame[category_col].astype("string").fillna("__missing__")
+    frame[price_col] = frame[price_col].astype("string").fillna("price_unknown")
+    total = max(len(frame), 1)
+    rows: list[Record] = []
+    for (category, price_bucket), group in frame.groupby([category_col, price_col], sort=True):
+        rows.append(
+            {
+                "split": split,
+                "variant": variant,
+                "stage": stage,
+                "top_k": int(top_k),
+                "source_category": str(category),
+                "price_bucket": str(price_bucket),
+                "rows": int(len(group)),
+                "proportion": float(len(group) / total),
+                "mean_rank": float(pd.to_numeric(group["rank"], errors="coerce").mean()),
+                "positive_rows": int(pd.to_numeric(group.get("label", 0), errors="coerce").fillna(0).sum()),
+            }
+        )
     return pd.DataFrame(rows, columns=columns)
 
 
@@ -3669,6 +3888,32 @@ def _iter_frame_batches(frame: pd.DataFrame, batch_size: int | None) -> Iterable
         yield frame.iloc[start:start + batch_size].copy()
 
 
+def _candidate_union_for_examples(
+    prepared: PreparedArtifacts,
+    split_artifacts: SplitArtifacts,
+    retrievers: dict[str, RetrieverArtifacts],
+    examples: pd.DataFrame,
+    inject_target_if_missing: bool = True,
+) -> pd.DataFrame:
+    batch_size = int(prepared.config.candidate_union_batch_size) if prepared.config.candidate_union_batch_size else None
+    candidate_batches: list[pd.DataFrame] = []
+    for example_batch in _iter_frame_batches(examples, batch_size):
+        candidates = generate_candidate_union(
+            prepared,
+            split_artifacts,
+            retrievers,
+            example_batch,
+            top_k=prepared.config.candidate_union_top_k,
+            inject_target_if_missing=inject_target_if_missing,
+            include_candidate_sources=False,
+        )
+        candidate_batches.append(candidates)
+        gc.collect()
+    if not candidate_batches:
+        return pd.DataFrame()
+    return pd.concat(candidate_batches, ignore_index=True)
+
+
 def _ranker_candidates_for_examples(
     prepared: PreparedArtifacts,
     split_artifacts: SplitArtifacts,
@@ -3743,22 +3988,51 @@ def evaluate_ranker(
 ) -> pd.DataFrame:
     embedding_retriever = _select_embedding_retriever(retrievers)
     rows: list[pd.DataFrame] = []
+    union_diagnostic_frames: list[pd.DataFrame] = []
+    served_distribution_frames: list[pd.DataFrame] = []
     for split_name, examples in [("val", split_artifacts.val_examples), ("test", split_artifacts.test_examples)]:
         eval_examples = examples
         eval_cap = prepared.config.ranker_val_example_cap if prepared.config.ranker_val_example_cap is not None else prepared.config.eval_user_cap
         if eval_cap is not None and len(eval_examples) > eval_cap:
             eval_examples = eval_examples.sample(n=eval_cap, random_state=prepared.config.seed).sort_values("example_id")
         LOGGER.info("Evaluating ranker on %s split: examples=%s", split_name, f"{len(eval_examples):,}")
-        candidate_frame = _ranker_candidates_for_examples(
-            prepared,
-            split_artifacts,
-            retrievers,
-            eval_examples,
-            inject_target_if_missing=False,
-        )
         variant = "hybrid_union" if isinstance(retrievers, dict) else embedding_retriever.variant
+        if isinstance(retrievers, dict):
+            union_frame = _candidate_union_for_examples(
+                prepared,
+                split_artifacts,
+                retrievers,
+                eval_examples,
+                inject_target_if_missing=False,
+            )
+            union_with_context = _add_candidate_item_context(prepared, union_frame)
+            union_diagnostics = candidate_recall_diagnostics(
+                union_with_context,
+                split=split_name,
+                variant=variant,
+                stage="candidate_union",
+            )
+            union_diagnostics.to_csv(prepared.config.eval_dir / f"{variant}_{split_name}_candidate_union_diagnostics_metrics.csv", index=False)
+            union_diagnostic_frames.append(union_diagnostics)
+            candidate_frame = (
+                union_frame.sort_values(["example_id", "retrieval_score"], ascending=[True, False])
+                .groupby("example_id", group_keys=False)
+                .head(prepared.config.ranker_candidate_top_k)
+                .reset_index(drop=True)
+            )
+            del union_frame
+            del union_with_context
+        else:
+            candidate_frame = _ranker_candidates_for_examples(
+                prepared,
+                split_artifacts,
+                retrievers,
+                eval_examples,
+                inject_target_if_missing=False,
+            )
+        candidate_frame_with_context = _add_candidate_item_context(prepared, candidate_frame)
         diagnostics = candidate_recall_diagnostics(
-            candidate_frame,
+            candidate_frame_with_context,
             split=split_name,
             variant=variant,
             stage="ranker_candidates",
@@ -3774,16 +4048,46 @@ def evaluate_ranker(
             del features
         ranked = ranker_metadata.sort_values(["example_id", "ranker_score"], ascending=[True, False]).copy()
         ranked["rank"] = ranked.groupby("example_id").cumcount() + 1
+        ranked_with_context = _add_candidate_item_context(prepared, ranked)
+        served_distribution_frames.append(
+            candidate_distribution_by_category_price(
+                ranked_with_context,
+                split=split_name,
+                variant=variant,
+                stage="ranker_top_10",
+                top_k=10,
+            )
+        )
         metrics = _metrics_from_ranked_candidates(ranked.rename(columns={"ranker_score": "retrieval_score"}), ks=(10, 50, 100))
         metrics["split"] = split_name
         metrics["variant"] = variant
         metrics["stage"] = "ranker"
         rows.append(metrics)
-        ranked.to_parquet(prepared.config.eval_dir / f"{metrics.iloc[0]['variant']}_{split_name}_ranked_candidates.parquet", index=False)
+        ranked_with_context.to_parquet(prepared.config.eval_dir / f"{metrics.iloc[0]['variant']}_{split_name}_ranked_candidates.parquet", index=False)
         del candidate_frame
+        del candidate_frame_with_context
         del ranker_metadata
         del ranked
+        del ranked_with_context
         gc.collect()
+    if union_diagnostic_frames:
+        union_diagnostics = pd.concat(union_diagnostic_frames, ignore_index=True)
+        scope_outputs = {
+            "target_category": "candidate_union_recall_by_category.csv",
+            "candidate_source": "candidate_union_recall_by_source.csv",
+            "history_length_bucket": "candidate_union_recall_by_history_bucket.csv",
+            "target_price_bucket": "candidate_union_recall_by_price_bucket.csv",
+        }
+        for scope, filename in scope_outputs.items():
+            scope_frame = union_diagnostics[union_diagnostics["scope"] == scope].copy()
+            if not scope_frame.empty:
+                scope_frame.to_csv(prepared.config.eval_dir / filename, index=False)
+    if served_distribution_frames:
+        served_distribution = pd.concat(served_distribution_frames, ignore_index=True)
+        if not served_distribution.empty:
+            served_distribution.to_csv(prepared.config.eval_dir / "served_distribution_by_category_price.csv", index=False)
+    if not rows:
+        return _normalize_metrics_frame(None, extra_columns=("split", "variant", "stage"))
     return pd.concat(rows, ignore_index=True)
 
 
@@ -4338,6 +4642,9 @@ def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
             {"name": "latent_cf_candidate_k", "value": config.latent_cf_candidate_k},
             {"name": "content_candidate_k", "value": config.content_candidate_k},
             {"name": "neural_candidate_k", "value": config.neural_candidate_k},
+            {"name": "popularity_backfill_k", "value": config.popularity_backfill_k},
+            {"name": "category_backfill_enabled", "value": config.category_backfill_enabled},
+            {"name": "recency_cooccurrence_enabled", "value": config.recency_cooccurrence_enabled},
             {"name": "candidate_union_top_k", "value": config.candidate_union_top_k},
             {"name": "candidate_union_batch_size", "value": config.candidate_union_batch_size},
             {"name": "ranker_candidate_top_k", "value": config.ranker_candidate_top_k},

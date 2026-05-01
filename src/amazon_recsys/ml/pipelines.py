@@ -35,7 +35,18 @@ def _metric_preview(csv_path: Path) -> EvaluationMetricPreview:
 
 def collect_evaluation_summary(pipeline_config: core.PipelineConfig) -> EvaluationSummary:
     eval_dir = Path(pipeline_config.eval_dir)
-    metric_files = sorted(eval_dir.glob("*_metrics.csv"))
+    metric_files = sorted(
+        {
+            *eval_dir.glob("*_metrics.csv"),
+            *(eval_dir / name for name in [
+                "candidate_union_recall_by_category.csv",
+                "candidate_union_recall_by_source.csv",
+                "candidate_union_recall_by_history_bucket.csv",
+                "candidate_union_recall_by_price_bucket.csv",
+                "served_distribution_by_category_price.csv",
+            ] if (eval_dir / name).exists()),
+        }
+    )
     return EvaluationSummary(
         eval_dir=str(eval_dir),
         metric_files=[_metric_preview(csv_path) for csv_path in metric_files],
@@ -65,6 +76,8 @@ def pipeline_config_from_settings(settings: AppSettings) -> core.PipelineConfig:
         latent_cf_candidate_k=settings.retrieval.latent_cf_candidate_k,
         content_candidate_k=settings.retrieval.content_candidate_k,
         neural_candidate_k=settings.retrieval.neural_candidate_k,
+        category_backfill_enabled=settings.retrieval.category_backfill_enabled,
+        recency_cooccurrence_enabled=settings.retrieval.recency_cooccurrence_enabled,
         eval_user_cap=settings.training.eval_user_cap,
         ranker_backend=settings.ranking.backend,
         ranker_candidate_top_k=settings.ranking.ranker_candidate_top_k,

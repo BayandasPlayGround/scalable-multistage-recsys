@@ -105,7 +105,16 @@
 
 {% macro drift_story(feature) -%}
   {% if not feature %}Monitoring is active, but no dominant drift story has emerged yet.
-  {% elif "price" in feature.feature_name %}Serving price mix shifted upward relative to the reference bundle. Inspect catalog mix and traffic-source changes first.
+  {% elif "price" in feature.feature_name %}
+    {% set ref_mean = feature.reference_value.mean if feature.reference_value is defined and feature.reference_value.mean is defined else none %}
+    {% set current_mean = feature.current_value.mean if feature.current_value is defined and feature.current_value.mean is defined else none %}
+    {% if ref_mean is not none and current_mean is not none and current_mean < ref_mean %}
+      Serving price mix shifted downward relative to the reference bundle. Inspect catalog mix and traffic-source changes first.
+    {% elif ref_mean is not none and current_mean is not none and current_mean > ref_mean %}
+      Serving price mix shifted upward relative to the reference bundle. Inspect catalog mix and traffic-source changes first.
+    {% else %}
+      Serving price mix shifted relative to the reference bundle. Inspect catalog mix and traffic-source changes first.
+    {% endif %}
   {% elif "rating" in feature.feature_name %}Average rating exposure moved materially. Validate whether serving is over-indexing on different trust bands.
   {% elif "category" in feature.feature_name %}Category mix changed meaningfully. Check whether audience composition or bundle scope moved since export.
   {% elif "source" in feature.feature_name %}Candidate-source balance changed. Review retriever participation and fallback behaviour for this window.
@@ -527,7 +536,15 @@
             <article class="stat-card"><span class="stat-label">Concept Drop</span><strong class="stat-value">{{ "%.3f"|format(window_concept.performance_drop) if window_concept.performance_drop is defined else "n/a" }}</strong><span class="stat-note">Largest relative degradation versus the offline baseline.</span></article>
           </div>
 
-          <div class="panel-head monitor-subhead"><div><p class="section-kicker">Analyst Interpretation</p><h2>{{ drift_story(window_feature_drifts[0] if window_feature_drifts else none) }}</h2></div></div>
+          <div class="panel-head monitor-subhead">
+            <div>
+              <p class="section-kicker">Analyst Interpretation</p>
+              <h2>{{ drift_story(window_feature_drifts[0] if window_feature_drifts else none) }}</h2>
+              {% if window_concept.status is defined and window_concept.status == "insufficient_data" %}
+              <p class="stat-note">Concept metrics are informational only for this window{% if window_concept.notes is defined and window_concept.notes.synthetic_outcomes %}; outcomes include synthetic local replay rows{% endif %}.</p>
+              {% endif %}
+            </div>
+          </div>
 
           <div class="comparison-grid">
             {{ concept_metric_card("Hit Rate", hit_key, summary) }}

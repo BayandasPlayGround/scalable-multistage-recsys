@@ -27,7 +27,7 @@ def _clean_numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").dropna().astype(float)
 
 
-def numeric_profile(series: pd.Series, *, bin_count: int = 5) -> NumericFeatureProfile:
+def numeric_profile(series: pd.Series, *, bin_count: int = 5, bin_edges: list[float] | None = None) -> NumericFeatureProfile:
     values = _clean_numeric_series(series)
     if values.empty:
         return {
@@ -37,20 +37,27 @@ def numeric_profile(series: pd.Series, *, bin_count: int = 5) -> NumericFeatureP
             "mean": None,
             "std": None,
         }
-    unique_values = np.unique(values.to_numpy())
-    if len(unique_values) == 1:
-        anchor = float(unique_values[0])
-        bin_edges = [anchor - 0.5, anchor + 0.5]
+    if bin_edges is not None and len(bin_edges) >= 2:
+        resolved_profile_edges = np.asarray(bin_edges, dtype=float)
     else:
-        quantiles = np.linspace(0, 1, num=min(bin_count, len(unique_values)) + 1)
-        bin_edges = np.quantile(values.to_numpy(), quantiles).astype(float)
-        bin_edges = np.unique(bin_edges)
-        if len(bin_edges) < 2:
-            bin_edges = np.array([float(values.min()) - 0.5, float(values.max()) + 0.5], dtype=float)
-    histogram, resolved_edges = np.histogram(values.to_numpy(), bins=bin_edges)
+        unique_values = np.unique(values.to_numpy())
+        if len(unique_values) == 1:
+            anchor = float(unique_values[0])
+            resolved_profile_edges = np.asarray([anchor - 0.5, anchor + 0.5], dtype=float)
+        else:
+            quantiles = np.linspace(0, 1, num=min(bin_count, len(unique_values)) + 1)
+            resolved_profile_edges = np.quantile(values.to_numpy(), quantiles).astype(float)
+            resolved_profile_edges = np.unique(resolved_profile_edges)
+            if len(resolved_profile_edges) < 2:
+                resolved_profile_edges = np.array([float(values.min()) - 0.5, float(values.max()) + 0.5], dtype=float)
+    histogram_edges = resolved_profile_edges.copy()
+    if len(histogram_edges) >= 2:
+        histogram_edges[0] = -np.inf
+        histogram_edges[-1] = np.inf
+    histogram, _ = np.histogram(values.to_numpy(), bins=histogram_edges)
     proportions = (histogram / histogram.sum()).tolist() if histogram.sum() else [1.0] * len(histogram)
     return {
-        "bin_edges": [float(edge) for edge in resolved_edges.tolist()],
+        "bin_edges": [float(edge) for edge in resolved_profile_edges.tolist()],
         "proportions": [float(value) for value in proportions],
         "sample_size": int(len(values)),
         "mean": float(values.mean()),
@@ -82,7 +89,10 @@ def _distribution_with_reference_bins(
     if values.empty:
         counts = np.zeros(len(bin_edges) - 1, dtype=float)
     else:
-        counts, _ = np.histogram(values.to_numpy(), bins=bin_edges)
+        histogram_edges = bin_edges.copy()
+        histogram_edges[0] = -np.inf
+        histogram_edges[-1] = np.inf
+        counts, _ = np.histogram(values.to_numpy(), bins=histogram_edges)
     if counts.sum() <= 0:
         proportions = np.full(len(counts), 1.0 / max(len(counts), 1), dtype=float)
     else:
@@ -351,6 +361,7 @@ def compute_concept_drift(
 
     if outcomes_frame.empty:
         metrics = _request_level_metrics(eligible["request_id"].drop_duplicates(), {}, {}, dict(eligible[["request_id", "query_mode"]].drop_duplicates().values), monitored_k)
+        outcome_source_counts: dict[str, int] = {}
     else:
         outcomes = outcomes_frame.copy()
         outcomes["occurred_at_ts"] = pd.to_datetime(outcomes["occurred_at"], utc=True, errors="coerce")
@@ -360,6 +371,13 @@ def compute_concept_drift(
             joined["occurred_at_ts"] <= joined["requested_at_ts"] + timedelta(days=int(monitoring.attribution_horizon_days))
         ) & (joined["occurred_at_ts"] >= joined["requested_at_ts"])
         joined = joined[joined["is_within_horizon"]].copy()
+        if "source" in joined.columns and not joined.empty:
+            outcome_source_counts = {
+                str(key): int(value)
+                for key, value in joined["source"].fillna("unknown").astype(str).value_counts().to_dict().items()
+            }
+        else:
+            outcome_source_counts = {}
 
         positive = joined[_is_positive_outcome(joined)].copy() if not joined.empty else joined
         purchases = joined[joined["event_type"].astype(str).str.lower() == "purchase"].copy() if not joined.empty else joined
@@ -396,6 +414,14 @@ def compute_concept_drift(
 
     performance_drop = float(max(relative_drops)) if relative_drops else 0.0
     sample_count = int(eligible["request_id"].nunique())
+    synthetic_outcome_count = int(outcome_source_counts.get("synthetic_inference_replay", 0))
+    min_events = int(monitoring.min_events_per_window)
+    concept_notes = {
+        "minimum_events_per_window": min_events,
+        "metrics_are_decisionable": bool(sample_count >= min_events and synthetic_outcome_count == 0),
+        "outcome_sources": outcome_source_counts,
+        "synthetic_outcomes": bool(synthetic_outcome_count > 0),
+    }
 
     previous_performance_drop = previous_summary.concept_drift.performance_drop if previous_summary is not None else 0.0
     previous_consecutive = previous_summary.concept_drift.consecutive_degraded_windows if previous_summary is not None else 0
@@ -403,7 +429,7 @@ def compute_concept_drift(
     degraded_previous = previous_performance_drop >= float(monitoring.performance_drop_warn)
     consecutive = previous_consecutive + 1 if degraded_now and degraded_previous else 1 if degraded_now else 0
 
-    if sample_count < int(monitoring.min_events_per_window):
+    if sample_count < min_events or synthetic_outcome_count > 0:
         status = "insufficient_data"
     elif performance_drop >= float(monitoring.performance_drop_alert) and previous_performance_drop >= float(monitoring.performance_drop_alert):
         status = "alert"
@@ -422,6 +448,7 @@ def compute_concept_drift(
         deltas=deltas,
         performance_drop=performance_drop,
         consecutive_degraded_windows=consecutive,
+        notes=concept_notes,
     )
 
 

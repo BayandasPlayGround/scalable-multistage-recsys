@@ -197,6 +197,7 @@ class MonitoringService:
                     event_type="purchase",
                     rating=5.0,
                     value=None,
+                    source="synthetic_inference_replay",
                 )
             )
 

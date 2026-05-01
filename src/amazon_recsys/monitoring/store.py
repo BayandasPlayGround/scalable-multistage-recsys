@@ -121,6 +121,7 @@ class LocalMonitoringStore:
                     event_type=str(row["event_type"]).strip().lower(),
                     rating=float(row["rating"]) if row.get("rating") is not None and row.get("rating") == row.get("rating") else None,
                     value=float(row["value"]) if row.get("value") is not None and row.get("value") == row.get("value") else None,
+                    source=str(row.get("source", "external")).strip() if row.get("source") is not None else "external",
                 )
             )
         ingested = self.append_outcome_records(records)

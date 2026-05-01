@@ -55,6 +55,7 @@ def test_monitoring_summary_is_persisted_and_exposed_via_api(test_settings, trai
     assert summary.inference_count == int(inference_frame["request_id"].nunique())
     assert summary.outcome_count == int(inference_frame["request_id"].nunique())
     assert summary.concept_drift.sample_size == int(inference_frame["request_id"].nunique())
+    assert summary.concept_drift.notes["synthetic_outcomes"] is True
     assert Path(bundle.manifest.notes["reference_profile_path"]).exists()
 
     latest = container.monitoring_service.latest_summary(bundle.manifest.version)

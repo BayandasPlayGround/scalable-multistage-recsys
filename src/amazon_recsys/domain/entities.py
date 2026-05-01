@@ -311,6 +311,7 @@ class OutcomeLogRecord:
     event_type: str
     rating: float | None = None
     value: float | None = None
+    source: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -347,6 +348,7 @@ class ConceptDriftResult:
     deltas: dict[str, float | None] = field(default_factory=dict)
     performance_drop: float = 0.0
     consecutive_degraded_windows: int = 0
+    notes: dict[str, JSONValue] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

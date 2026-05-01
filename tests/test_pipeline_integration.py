@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,6 +54,11 @@ def test_training_bundle_round_trip(test_container, train_export_activate) -> No
     assert available_users[0].interaction_count >= 1
     assert model.version == "fixture-bundle"
     assert summary.metric_files
+    metric_file_names = {metric.file for metric in summary.metric_files}
+    assert "candidate_union_recall_by_category.csv" in metric_file_names
+    assert "candidate_union_recall_by_source.csv" in metric_file_names
+    assert "candidate_union_recall_by_history_bucket.csv" in metric_file_names
+    assert "served_distribution_by_category_price.csv" in metric_file_names
 
     client = TestClient(create_app(test_container.settings))
     api_response = client.post("/recommend", json={"user_id": "u1", "top_k": 2})
@@ -75,9 +81,9 @@ def test_training_bundle_round_trip(test_container, train_export_activate) -> No
 def test_candidate_recall_diagnostics_break_down_categories_and_sources() -> None:
     candidates = pd.DataFrame(
         [
-            {"example_id": 1, "label": 1, "rank": 1, "target_source_category": "Automotive", "from_cooccurrence": 1, "from_latent_cf": 0},
-            {"example_id": 1, "label": 0, "rank": 2, "target_source_category": "Automotive", "from_cooccurrence": 0, "from_latent_cf": 1},
-            {"example_id": 2, "label": 0, "rank": 1, "target_source_category": "All_Beauty", "from_cooccurrence": 1, "from_latent_cf": 0},
+            {"example_id": 1, "label": 1, "rank": 1, "target_source_category": "Automotive", "history_length": 4, "target_price_bucket": "price_low", "from_cooccurrence": 1, "from_latent_cf": 0},
+            {"example_id": 1, "label": 0, "rank": 2, "target_source_category": "Automotive", "history_length": 4, "target_price_bucket": "price_low", "from_cooccurrence": 0, "from_latent_cf": 1},
+            {"example_id": 2, "label": 0, "rank": 1, "target_source_category": "All_Beauty", "history_length": 18, "target_price_bucket": "price_high", "from_cooccurrence": 1, "from_latent_cf": 0},
         ]
     )
 
@@ -92,7 +98,73 @@ def test_candidate_recall_diagnostics_break_down_categories_and_sources() -> Non
     assert by_scope[("overall", "all")]["hit_rate"] == pytest.approx(0.5)
     assert by_scope[("target_category", "Automotive")]["hit_rate"] == pytest.approx(1.0)
     assert by_scope[("target_category", "All_Beauty")]["hit_rate"] == pytest.approx(0.0)
+    assert by_scope[("history_length_bucket", "03-05")]["hit_rate"] == pytest.approx(1.0)
+    assert by_scope[("history_length_bucket", "11-25")]["hit_rate"] == pytest.approx(0.0)
+    assert by_scope[("target_price_bucket", "price_low")]["positive_recoveries"] == 1
     assert by_scope[("candidate_source", "cooccurrence")]["positive_recoveries"] == 1
+
+
+@pytest.mark.retrieval
+def test_category_aware_popularity_backfill_reserves_global_fallback() -> None:
+    config = core.PipelineConfig(
+        categories=("Automotive", "Industrial_and_Scientific"),
+        category_backfill_enabled=True,
+        popularity_backfill_k=5,
+    )
+    split_artifacts = SimpleNamespace(
+        config=config,
+        train_item_popularity=Counter({101: 100, 102: 90, 201: 80, 301: 70, 302: 60}),
+        category_item_popularity={
+            "Automotive": Counter({101: 100, 102: 90}),
+            "Industrial_and_Scientific": Counter({201: 80}),
+        },
+    )
+    examples = pd.DataFrame(
+        [
+            {
+                "example_id": 1,
+                "split": "test",
+                "user_id": "u1",
+                "history_item_idxs": [],
+                "target_item_idx": 999,
+                "pref_Automotive": 0.5,
+                "pref_Industrial_and_Scientific": 0.5,
+            }
+        ]
+    )
+
+    candidates = core.popularity_by_category_candidates(split_artifacts, examples, top_k=5)
+
+    assert set(candidates["item_idx"]).issuperset({101, 201})
+    assert len(candidates) == 5
+
+
+@pytest.mark.retrieval
+def test_recency_weighted_cooccurrence_prefers_recent_history() -> None:
+    config = core.PipelineConfig(recency_cooccurrence_enabled=True)
+    split_artifacts = SimpleNamespace(
+        config=config,
+        cooccurrence={
+            1: Counter({101: 100}),
+            2: Counter({202: 60}),
+        },
+        train_item_popularity=Counter(),
+    )
+    examples = pd.DataFrame(
+        [
+            {
+                "example_id": 1,
+                "split": "test",
+                "user_id": "u1",
+                "history_item_idxs": [1, 2],
+                "target_item_idx": 999,
+            }
+        ]
+    )
+
+    candidates = core.item_item_cooccurrence_candidates(split_artifacts, examples, top_k=2)
+
+    assert candidates.iloc[0]["item_idx"] == 202
 
 
 @pytest.mark.retrieval

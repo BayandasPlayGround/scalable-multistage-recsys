@@ -117,7 +117,10 @@ def build_reference_profile(
     popularity_thresholds = _popularity_thresholds(prepared.item_features)
 
     numeric_features = {
-        "request_history_length": numeric_profile(request_examples["history_length"]),
+        "request_history_length": numeric_profile(
+            request_examples["history_length"],
+            bin_edges=[0.0, 1.0, 3.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 1000.0],
+        ),
         "known_user_rate": numeric_profile(pd.Series([1.0] * len(request_examples), dtype="float64")),
         "unseen_user_rate": numeric_profile(pd.Series([0.0] * len(request_examples), dtype="float64")),
         "unseen_history_item_rate": numeric_profile(pd.Series([0.0] * len(request_examples), dtype="float64")),
