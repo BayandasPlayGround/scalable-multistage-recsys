@@ -221,6 +221,8 @@ These are the decisions most likely to affect production cost or SLOs:
 | Training-serving skew | Feature logic can diverge between Databricks and FastAPI. | Keep shared transformations in the package where practical, or move feature definitions into a governed feature store with online lookup. |
 | Cold-start and autoscale behavior | Ranking services need predictable tail latency. | Use minimum replicas, readiness checks, warm bundles, HPA/KEDA policies, and load tests before production release. |
 
+If an online store already does around 2,000-3,500 sales per month, and this recommender can lift sales by about 5%, then a lean production version could pay for itself.
+
 ## Recommended Rollout
 
 ### Phase 1: Azure Production MVP
