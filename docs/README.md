@@ -7,6 +7,7 @@ This folder holds the detailed project documentation that used to live in the to
 ## Guides
 
 - [Architecture Guide](architecture.md)
+- [Multistage Recsys Design](multistage-recsys-design.md)
 - [Running The App](running-the-app.md)
 - [MLflow Guide](mlflow.md)
 - [Drift Monitoring Guide](monitoring.md)
@@ -15,8 +16,9 @@ This folder holds the detailed project documentation that used to live in the to
 
 1. [Running The App](running-the-app.md)
 2. [Architecture Guide](architecture.md)
-3. [MLflow Guide](mlflow.md)
-4. [Drift Monitoring Guide](monitoring.md)
+3. [Multistage Recsys Design](multistage-recsys-design.md)
+4. [MLflow Guide](mlflow.md)
+5. [Drift Monitoring Guide](monitoring.md)
 
 ## What Each File Covers
 
@@ -25,6 +27,11 @@ This folder holds the detailed project documentation that used to live in the to
   - ML architecture
   - notebook vs production workflow
   - Azure-first layout
+- `multistage-recsys-design.md`
+  - expanded Azure implementation design
+  - two-stage candidate generation and ranking flow
+  - Azure service mapping for the reference system diagram
+  - rollout, security, latency, and cost notes
 - `running-the-app.md`
   - exact local commands
   - beginner command walkthrough

@@ -96,6 +96,8 @@ Use [`docs/running-the-app.md`](docs/running-the-app.md) for the detailed traini
 
 In practice, this system would usually sit behind a web or mobile product as an online recommendation service. A common Azure shape is:
 
+For the expanded Azure multistage architecture, see [Multistage Recsys Design](docs/multistage-recsys-design.md).
+
 - train and export a bundle from CI, Azure ML, or a scheduled batch job
 - store the exported ONNX bundle under durable storage and activate the current version
 - deploy the FastAPI service to Azure App Service, Azure Container Apps, or AKS
@@ -133,6 +135,7 @@ Detailed guides live under [`docs/`](docs/README.md).
 
 - [Docs Hub](docs/README.md)
 - [Architecture Guide](docs/architecture.md)
+- [Multistage Recsys Design](docs/multistage-recsys-design.md)
 - [Running The App](docs/running-the-app.md)
 - [MLflow Guide](docs/mlflow.md)
 - [Drift Monitoring Guide](docs/monitoring.md)
