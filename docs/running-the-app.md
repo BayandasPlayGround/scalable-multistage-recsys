@@ -61,6 +61,10 @@ Important defaults:
 
 ### Step 3: Train, Export, And Activate A Bundle
 
+Before running training, download the Amazon Reviews 2023 files from the official dataset page and place them in a folder named `amazon_review_data` at the project root, unless you set `AMAZON_RECSYS_DATA_DIR` to another location:
+
+- [Amazon Reviews 2023](https://amazon-reviews-2023.github.io/)
+
 ```powershell
 python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
 ```
@@ -128,7 +132,9 @@ Profile defaults are applied only when the corresponding internal `PipelineConfi
 
 ### Data Files
 
-The code expects Amazon review files under:
+The training command does not download review data for you. Download the Amazon Reviews 2023 dataset from [https://amazon-reviews-2023.github.io/](https://amazon-reviews-2023.github.io/) and keep the default local folder name as `amazon_review_data` unless you explicitly override `AMAZON_RECSYS_DATA_DIR`.
+
+By default, the code expects Amazon review files under:
 
 ```text
 amazon_review_data/

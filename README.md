@@ -39,6 +39,23 @@ The training and export entry point is:
 python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
 ```
 
+## Dataset
+
+This project uses the Amazon Reviews 2023 dataset. Download and documentation are available from the official dataset page:
+
+- [Amazon Reviews 2023](https://amazon-reviews-2023.github.io/)
+
+Please cite the dataset paper when using this project or derived experiments:
+
+```bibtex
+@article{hou2024bridging,
+  title={Bridging Language and Items for Retrieval and Recommendation},
+  author={Hou, Yupeng and Li, Jiacheng and He, Zhankui and Yan, An and Chen, Xiusi and McAuley, Julian},
+  journal={arXiv preprint arXiv:2403.03952},
+  year={2024}
+}
+```
+
 ## Training Configuration
 
 Training is configured from `.env`, temporary `AMAZON_RECSYS_*` environment variables, and a few CLI flags. The CLI flags are intentionally small:
