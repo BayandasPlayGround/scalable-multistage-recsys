@@ -2298,3 +2298,300 @@ button:focus-visible {
     gap: 0.45rem;
   }
 }
+
+.viewport-mode-switch {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.7rem;
+  border: 1px solid var(--sidebar-panel-border);
+  border-radius: 16px;
+  background: var(--sidebar-panel-bg);
+}
+
+.viewport-mode-label {
+  color: var(--sidebar-muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.viewport-mode-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem;
+  padding: 0.25rem;
+  border: 1px solid var(--sidebar-panel-border);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.viewport-mode-option {
+  min-height: 38px;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--sidebar-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.viewport-mode-option:hover {
+  color: var(--sidebar-ink);
+  background: var(--sidebar-hover);
+}
+
+.viewport-mode-option.is-active {
+  background: var(--sidebar-active);
+  color: var(--sidebar-ink);
+  box-shadow: inset 0 0 0 1px var(--sidebar-panel-border);
+}
+
+:root[data-viewport-mode="desktop"] body {
+  overflow-x: auto;
+}
+
+:root[data-viewport-mode="desktop"] .app-shell {
+  grid-template-columns: 280px minmax(0, 1fr);
+  width: 100%;
+  min-width: 1060px;
+  max-width: none;
+  margin: 0;
+  box-shadow: none;
+}
+
+:root[data-viewport-mode="desktop"] .sidebar {
+  position: sticky;
+  top: 0;
+  gap: 2rem;
+  height: 100vh;
+  padding: 2rem 1.5rem;
+  box-shadow: var(--sidebar-shadow);
+}
+
+:root[data-viewport-mode="desktop"] .sidebar-nav {
+  grid-template-columns: 1fr;
+}
+
+:root[data-viewport-mode="desktop"] .workspace-main {
+  width: min(1380px, 100%);
+  padding: 1.7rem 1.8rem 2.6rem;
+}
+
+:root[data-viewport-mode="desktop"] .hero-banner {
+  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.9fr);
+}
+
+:root[data-viewport-mode="desktop"] .content-grid:not(.qa-results-shell) {
+  grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.95fr);
+}
+
+:root[data-viewport-mode="desktop"] .decision-layer {
+  grid-template-columns: minmax(0, 1.5fr) minmax(320px, 1fr);
+}
+
+:root[data-viewport-mode="desktop"] .stats-grid,
+:root[data-viewport-mode="desktop"] .stats-grid-compact,
+:root[data-viewport-mode="desktop"] .profile-stat-grid,
+:root[data-viewport-mode="desktop"] .monitor-summary-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+:root[data-viewport-mode="desktop"] .decision-stack {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+:root[data-viewport-mode="desktop"] .overview-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+}
+
+:root[data-viewport-mode="desktop"] .action-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+:root[data-viewport-mode="desktop"] .form-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 180px;
+}
+
+:root[data-viewport-mode="desktop"] .table-toolbar {
+  grid-template-columns: minmax(260px, 1.6fr) repeat(2, minmax(160px, 0.8fr)) auto;
+}
+
+:root[data-viewport-mode="desktop"] .table-toolbar[data-table-toolbar="history"] {
+  grid-template-columns: minmax(320px, 1fr) auto;
+}
+
+:root[data-viewport-mode="desktop"] .qa-context-card .mini-metric-list {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+:root[data-viewport-mode="desktop"] .panel-head,
+:root[data-viewport-mode="desktop"] .profile-hero,
+:root[data-viewport-mode="desktop"] .monitoring-toolbar,
+:root[data-viewport-mode="desktop"] .operational-banner,
+:root[data-viewport-mode="desktop"] .monitor-visual-head,
+:root[data-viewport-mode="desktop"] .distribution-card-head {
+  flex-direction: row;
+}
+
+:root[data-viewport-mode="desktop"] .panel-head,
+:root[data-viewport-mode="desktop"] .monitor-visual-head,
+:root[data-viewport-mode="desktop"] .distribution-card-head {
+  align-items: start;
+}
+
+:root[data-viewport-mode="desktop"] .profile-hero {
+  align-items: start;
+}
+
+:root[data-viewport-mode="desktop"] .monitoring-toolbar {
+  align-items: end;
+}
+
+:root[data-viewport-mode="desktop"] .operational-banner {
+  align-items: center;
+}
+
+:root[data-viewport-mode="desktop"] .button-primary,
+:root[data-viewport-mode="desktop"] .button-secondary {
+  width: auto;
+}
+
+:root[data-viewport-mode="desktop"] .compact-metadata dd,
+:root[data-viewport-mode="desktop"] .metadata dd {
+  text-align: right;
+}
+
+:root[data-viewport-mode="desktop"] .timeline-item {
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 0.95rem;
+}
+
+:root[data-viewport-mode="desktop"] .mix-bar-block {
+  grid-template-columns: minmax(110px, 1fr) minmax(0, 2fr) 48px;
+}
+
+:root[data-viewport-mode="mobile"] body {
+  overflow-x: hidden;
+}
+
+:root[data-viewport-mode="mobile"] .app-shell {
+  grid-template-columns: 1fr;
+  width: min(430px, 100%);
+  max-width: 430px;
+  min-height: 100vh;
+  margin: 0 auto;
+  overflow: hidden;
+  background: var(--canvas);
+  box-shadow: 0 0 0 1px var(--line), 0 24px 70px rgba(24, 38, 56, 0.14);
+}
+
+:root[data-viewport-mode="mobile"] .sidebar {
+  position: static;
+  gap: 1.2rem;
+  height: auto;
+  padding: 1.1rem;
+  box-shadow: none;
+}
+
+:root[data-viewport-mode="mobile"] .sidebar-nav,
+:root[data-viewport-mode="mobile"] .stats-grid,
+:root[data-viewport-mode="mobile"] .stats-grid-compact,
+:root[data-viewport-mode="mobile"] .panel-grid,
+:root[data-viewport-mode="mobile"] .form-grid,
+:root[data-viewport-mode="mobile"] .table-toolbar,
+:root[data-viewport-mode="mobile"] .comparison-grid,
+:root[data-viewport-mode="mobile"] .insight-summary-grid,
+:root[data-viewport-mode="mobile"] .distribution-grid,
+:root[data-viewport-mode="mobile"] .trend-grid,
+:root[data-viewport-mode="mobile"] .decision-layer,
+:root[data-viewport-mode="mobile"] .decision-stack,
+:root[data-viewport-mode="mobile"] .overview-grid,
+:root[data-viewport-mode="mobile"] .action-grid,
+:root[data-viewport-mode="mobile"] .profile-stat-grid,
+:root[data-viewport-mode="mobile"] .monitor-summary-grid,
+:root[data-viewport-mode="mobile"] .detail-grid,
+:root[data-viewport-mode="mobile"] .hero-banner,
+:root[data-viewport-mode="mobile"] .content-grid,
+:root[data-viewport-mode="mobile"] .qa-context-card .mini-metric-list {
+  grid-template-columns: 1fr;
+}
+
+:root[data-viewport-mode="mobile"] .workspace-main {
+  width: 100%;
+  padding: 0.95rem 0.95rem 2rem;
+}
+
+:root[data-viewport-mode="mobile"] .hero-card,
+:root[data-viewport-mode="mobile"] .panel,
+:root[data-viewport-mode="mobile"] .stat-card {
+  padding: 1.2rem;
+}
+
+:root[data-viewport-mode="mobile"] .workspace-switcher {
+  justify-content: stretch;
+}
+
+:root[data-viewport-mode="mobile"] .tab-bar {
+  width: 100%;
+}
+
+:root[data-viewport-mode="mobile"] .tab-button {
+  flex: 1 1 100%;
+}
+
+:root[data-viewport-mode="mobile"] .toolbar-field-compact {
+  max-width: none;
+}
+
+:root[data-viewport-mode="mobile"] .toolbar-summary {
+  justify-content: flex-start;
+}
+
+:root[data-viewport-mode="mobile"] .compact-metadata div,
+:root[data-viewport-mode="mobile"] .metadata div,
+:root[data-viewport-mode="mobile"] .mini-metric,
+:root[data-viewport-mode="mobile"] .panel-head {
+  grid-template-columns: 1fr;
+  flex-direction: column;
+}
+
+:root[data-viewport-mode="mobile"] .compact-metadata dd,
+:root[data-viewport-mode="mobile"] .metadata dd {
+  text-align: left;
+}
+
+:root[data-viewport-mode="mobile"] .button-primary,
+:root[data-viewport-mode="mobile"] .button-secondary {
+  width: 100%;
+}
+
+:root[data-viewport-mode="mobile"] .operational-banner,
+:root[data-viewport-mode="mobile"] .profile-hero,
+:root[data-viewport-mode="mobile"] .monitoring-toolbar,
+:root[data-viewport-mode="mobile"] .monitor-visual-head,
+:root[data-viewport-mode="mobile"] .distribution-card-head {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+:root[data-viewport-mode="mobile"] .timeline-item,
+:root[data-viewport-mode="mobile"] .mix-bar-block {
+  grid-template-columns: 1fr;
+}
+
+:root[data-viewport-mode="mobile"] .timeline-item {
+  gap: 0.45rem;
+}
+
+:root[data-viewport-mode="mobile"] .table-wrap {
+  max-width: 100%;
+}
+
+:root[data-viewport-mode="mobile"] th,
+:root[data-viewport-mode="mobile"] td {
+  padding-inline: 0.5rem;
+  font-size: 0.94rem;
+}

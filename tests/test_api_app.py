@@ -48,9 +48,14 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     assert "/static/favicon.svg?v=" in page_response.text
     assert "/static/style.css?v=" in page_response.text
     assert "/static/app.js?v=" in page_response.text
+    assert "2026-05-03-viewport-toggle-1" in page_response.text
     assert 'name="color-scheme" content="light dark"' in page_response.text
     assert "amazon-recsys-theme" in page_response.text
     assert "data-theme-toggle" in page_response.text
+    assert "amazon-recsys-viewport-mode" in page_response.text
+    assert "data-viewport-mode-switch" in page_response.text
+    assert 'data-viewport-mode-option="desktop"' in page_response.text
+    assert 'data-viewport-mode-option="mobile"' in page_response.text
     assert "data-enhanced-form" in page_response.text
     assert "Analyst Workflow Modes" in page_response.text
     assert 'data-tab-group="workspace"' in page_response.text

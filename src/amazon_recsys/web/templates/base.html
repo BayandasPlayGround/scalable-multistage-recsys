@@ -5,17 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>{{ title or "Amazon RecSys Platform" }}</title>
-    {% set static_version = "2026-04-22-theme-toggle-1" %}
+    {% set static_version = "2026-05-03-viewport-toggle-1" %}
     <script>
       (() => {
+        let viewportMode = "desktop";
         try {
           const storedTheme = window.localStorage.getItem("amazon-recsys-theme");
           if (storedTheme === "light" || storedTheme === "dark") {
             document.documentElement.dataset.theme = storedTheme;
           }
+          const storedViewportMode = window.localStorage.getItem("amazon-recsys-viewport-mode");
+          if (storedViewportMode === "desktop" || storedViewportMode === "mobile") {
+            viewportMode = storedViewportMode;
+          }
         } catch (error) {
-          // Keep the system color-scheme preference when storage is unavailable.
+          // Keep the system color-scheme preference and desktop viewport when storage is unavailable.
         }
+        document.documentElement.dataset.viewportMode = viewportMode;
       })();
     </script>
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='/favicon.svg') }}?v={{ static_version }}" />
@@ -62,6 +68,14 @@
             <span class="theme-toggle-note" data-theme-toggle-note>Follows system</span>
           </span>
         </button>
+
+        <div class="viewport-mode-switch" data-viewport-mode-switch role="group" aria-label="Viewport mode">
+          <span class="viewport-mode-label">View</span>
+          <div class="viewport-mode-options">
+            <button class="viewport-mode-option is-active" type="button" data-viewport-mode-option="desktop" aria-pressed="true" title="Show desktop view">Desktop</button>
+            <button class="viewport-mode-option" type="button" data-viewport-mode-option="mobile" aria-pressed="false" title="Show mobile view">Mobile</button>
+          </div>
+        </div>
 
         <div class="sidebar-footnote">
           <p>Bundle health, recommendation QA, user analysis, and drift review in one analyst workspace.</p>

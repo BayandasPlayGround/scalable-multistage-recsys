@@ -8,9 +8,12 @@
   const navItemSelector = ".nav-item[data-tab-link]";
   const tabPanelSelector = "[data-tab-panel]";
   const themeToggleSelector = "[data-theme-toggle]";
+  const viewportModeSwitchSelector = "[data-viewport-mode-switch]";
+  const viewportModeOptionSelector = "[data-viewport-mode-option]";
   const tabStatePrefix = "amazon-recsys-tab:";
   const tableResizeStoragePrefix = "amazon-recsys-column-widths:";
   const themeStorageKey = "amazon-recsys-theme";
+  const viewportModeStorageKey = "amazon-recsys-viewport-mode";
   const themeMediaQuery = window.matchMedia?.("(prefers-color-scheme: dark)");
 
   function readStoredTheme() {
@@ -87,6 +90,66 @@
     } else if (themeMediaQuery?.addListener) {
       themeMediaQuery.addListener(syncSystemTheme);
     }
+  }
+
+  function isValidViewportMode(mode) {
+    return mode === "desktop" || mode === "mobile";
+  }
+
+  function readStoredViewportMode() {
+    try {
+      const storedMode = window.localStorage.getItem(viewportModeStorageKey);
+      return isValidViewportMode(storedMode) ? storedMode : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function writeStoredViewportMode(mode) {
+    try {
+      window.localStorage.setItem(viewportModeStorageKey, mode);
+    } catch (error) {
+      // Keep the selected viewport for this page view when storage is unavailable.
+    }
+  }
+
+  function getActiveViewportMode() {
+    const documentMode = document.documentElement.dataset.viewportMode;
+    if (isValidViewportMode(documentMode)) {
+      return documentMode;
+    }
+    return readStoredViewportMode() || "desktop";
+  }
+
+  function updateViewportModeSwitch(activeMode) {
+    const switchNode = document.querySelector(viewportModeSwitchSelector);
+    const options = Array.from(document.querySelectorAll(viewportModeOptionSelector));
+    if (!switchNode || !options.length) {
+      return;
+    }
+
+    switchNode.dataset.activeViewportMode = activeMode;
+    switchNode.setAttribute("aria-label", `Viewport mode: ${activeMode}`);
+    options.forEach((option) => {
+      const optionMode = option.dataset.viewportModeOption || "";
+      const isActive = optionMode === activeMode;
+      option.classList.toggle("is-active", isActive);
+      option.setAttribute("aria-pressed", String(isActive));
+      option.setAttribute("title", `Show ${optionMode} view`);
+    });
+  }
+
+  function applyViewportMode(mode, { persist = false } = {}) {
+    const nextMode = isValidViewportMode(mode) ? mode : "desktop";
+    document.documentElement.dataset.viewportMode = nextMode;
+    if (persist) {
+      writeStoredViewportMode(nextMode);
+    }
+    updateViewportModeSwitch(nextMode);
+  }
+
+  function initialiseViewportMode() {
+    applyViewportMode(readStoredViewportMode() || getActiveViewportMode());
   }
 
   function formatLabel(value) {
@@ -679,6 +742,13 @@
       return;
     }
 
+    const viewportModeOption = event.target.closest(viewportModeOptionSelector);
+    if (viewportModeOption) {
+      event.preventDefault();
+      applyViewportMode(viewportModeOption.dataset.viewportModeOption, { persist: true });
+      return;
+    }
+
     const tabButton = event.target.closest(tabButtonSelector);
     if (tabButton) {
       event.preventDefault();
@@ -779,6 +849,7 @@
   });
 
   initialiseTheme();
+  initialiseViewportMode();
   initialiseTableFilters(document);
   initialiseSortableTables(document);
   initialiseResizableTables(document);
