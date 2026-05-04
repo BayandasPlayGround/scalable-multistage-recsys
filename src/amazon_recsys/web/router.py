@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import signal
+import subprocess
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from amazon_recsys.application.services import BundleRecommendationService
+from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import EvaluationSummary
 from amazon_recsys.presentation.dependencies import get_recommendation_service
 
@@ -19,6 +22,10 @@ from amazon_recsys.presentation.dependencies import get_recommendation_service
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
 router = APIRouter(include_in_schema=False)
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+DATASET_PAGE_URL = "https://amazon-reviews-2023.github.io/"
+DATASET_DOWNLOAD_SCRIPT = "download_amazon_reviews_2023.py"
+DATASET_DOWNLOAD_LOCK = threading.Lock()
+DATASET_DOWNLOAD_PROCESS: subprocess.Popen | None = None
 
 
 def _split_history_items(raw_value: str | None) -> list[str] | None:
@@ -42,6 +49,33 @@ def _is_loopback_request(request: Request) -> bool:
 
 def _can_shutdown_from_request(request: Request, environment: str) -> bool:
     return environment == "local" or _is_loopback_request(request)
+
+
+def _script_command(settings: AppSettings) -> str:
+    data_dir = settings.resolved_data_dir
+    categories = " ".join(settings.categories)
+    return f'python scripts\\{DATASET_DOWNLOAD_SCRIPT} --destination "{data_dir}" --categories {categories}'
+
+
+def _dataset_status(settings: AppSettings) -> dict[str, object]:
+    data_dir = settings.resolved_data_dir
+    categories = tuple(settings.categories)
+    missing_files: list[str] = []
+    for category in categories:
+        review_path = data_dir / f"{category}.jsonl"
+        metadata_path = data_dir / "metadata" / f"meta_{category}.jsonl.gz"
+        if not review_path.exists():
+            missing_files.append(str(review_path))
+        if not metadata_path.exists():
+            missing_files.append(str(metadata_path))
+    return {
+        "present": not missing_files,
+        "directory": str(data_dir),
+        "categories": categories,
+        "missing_files": missing_files,
+        "dataset_url": DATASET_PAGE_URL,
+        "download_command": _script_command(settings),
+    }
 
 
 def _parse_iso_timestamp(value: str | None) -> datetime | None:
@@ -238,6 +272,8 @@ def index(
             "selected_user_recommendations": selected_user_recommendations,
             "is_local_environment": service.settings.environment == "local",
             "can_shutdown_local_server": _can_shutdown_from_request(request, service.settings.environment),
+            "can_download_dataset": _can_shutdown_from_request(request, service.settings.environment),
+            "dataset_status": _dataset_status(service.settings),
             "environment_name": service.settings.environment,
             "user_id": user_id or "",
             "history_items": history_items or "",
@@ -262,3 +298,44 @@ def local_shutdown(request: Request) -> JSONResponse:
     timer.daemon = True
     timer.start()
     return JSONResponse({"status": "shutting_down", "detail": "Local server shutdown requested."})
+
+
+@router.post("/local/download-dataset")
+def local_download_dataset(request: Request) -> JSONResponse:
+    settings = request.app.state.container.settings
+    if not _can_shutdown_from_request(request, settings.environment):
+        return JSONResponse(status_code=403, content={"status": "forbidden", "detail": "Dataset download is available only from localhost or the local environment."})
+
+    global DATASET_DOWNLOAD_PROCESS
+    with DATASET_DOWNLOAD_LOCK:
+        if DATASET_DOWNLOAD_PROCESS is not None and DATASET_DOWNLOAD_PROCESS.poll() is None:
+            return JSONResponse(
+                {
+                    "status": "already_running",
+                    "detail": "Dataset download is already running.",
+                    "log_path": str(settings.resolved_artifact_root / "dataset_download.log"),
+                }
+            )
+
+        script_path = settings.code_root / "scripts" / DATASET_DOWNLOAD_SCRIPT
+        if not script_path.exists():
+            return JSONResponse(status_code=500, content={"status": "missing_script", "detail": f"Download script was not found at {script_path}."})
+
+        settings.resolved_artifact_root.mkdir(parents=True, exist_ok=True)
+        log_path = settings.resolved_artifact_root / "dataset_download.log"
+        with open(log_path, "ab") as log_handle:
+            DATASET_DOWNLOAD_PROCESS = subprocess.Popen(
+                [sys.executable, str(script_path), "--destination", str(settings.resolved_data_dir), "--categories", *settings.categories],
+                cwd=str(settings.code_root),
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
+        return JSONResponse(
+            {
+                "status": "started",
+                "detail": "Dataset download started in the background.",
+                "pid": DATASET_DOWNLOAD_PROCESS.pid,
+                "log_path": str(log_path),
+                "data_dir": str(settings.resolved_data_dir),
+            }
+        )

@@ -65,6 +65,12 @@ Before running training, download the Amazon Reviews 2023 files from the officia
 
 - [Amazon Reviews 2023](https://amazon-reviews-2023.github.io/)
 
+The project also includes a downloader for the default categories:
+
+```powershell
+python scripts\download_amazon_reviews_2023.py
+```
+
 ```powershell
 python -m amazon_recsys.cli.main export-bundle --run-name debug-local --run-profile debug --activate
 ```
@@ -133,6 +139,12 @@ Profile defaults are applied only when the corresponding internal `PipelineConfi
 ### Data Files
 
 The training command does not download review data for you. Download the Amazon Reviews 2023 dataset from [https://amazon-reviews-2023.github.io/](https://amazon-reviews-2023.github.io/) and keep the default local folder name as `amazon_review_data` unless you explicitly override `AMAZON_RECSYS_DATA_DIR`.
+
+For the default project categories, the bundled downloader creates the same layout:
+
+```powershell
+python scripts\download_amazon_reviews_2023.py
+```
 
 By default, the code expects Amazon review files under:
 

@@ -10,10 +10,17 @@
   const themeToggleSelector = "[data-theme-toggle]";
   const viewportModeSwitchSelector = "[data-viewport-mode-switch]";
   const viewportModeOptionSelector = "[data-viewport-mode-option]";
+  const datasetModalSelector = "[data-dataset-modal]";
+  const datasetDismissSelector = "[data-dataset-dismiss]";
+  const datasetCopyCommandSelector = "[data-dataset-copy-command]";
+  const datasetCommandTextSelector = "[data-dataset-command-text]";
+  const localDatasetDownloadSelector = "[data-local-dataset-download]";
+  const datasetDownloadStatusSelector = "[data-dataset-download-status]";
   const tabStatePrefix = "amazon-recsys-tab:";
   const tableResizeStoragePrefix = "amazon-recsys-column-widths:";
   const themeStorageKey = "amazon-recsys-theme";
   const viewportModeStorageKey = "amazon-recsys-viewport-mode";
+  const datasetPromptStorageKey = "amazon-recsys-dataset-prompt-dismissed";
   const themeMediaQuery = window.matchMedia?.("(prefers-color-scheme: dark)");
 
   function readStoredTheme() {
@@ -150,6 +157,111 @@
 
   function initialiseViewportMode() {
     applyViewportMode(readStoredViewportMode() || getActiveViewportMode());
+  }
+
+  function readDatasetPromptDismissed() {
+    try {
+      return window.localStorage.getItem(datasetPromptStorageKey) === "true";
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function writeDatasetPromptDismissed() {
+    try {
+      window.localStorage.setItem(datasetPromptStorageKey, "true");
+    } catch (error) {
+      // The prompt remains dismissible for the current page when storage is unavailable.
+    }
+  }
+
+  function getDatasetModal() {
+    return document.querySelector(datasetModalSelector);
+  }
+
+  function setDatasetModalStatus(message, tone = "info") {
+    const status = document.querySelector(datasetDownloadStatusSelector);
+    if (!status) {
+      return;
+    }
+    status.hidden = false;
+    status.textContent = message;
+    status.dataset.statusTone = tone;
+  }
+
+  function closeDatasetModal({ persist = true } = {}) {
+    const modal = getDatasetModal();
+    if (!modal) {
+      return;
+    }
+    modal.hidden = true;
+    document.body.classList.remove("is-modal-open");
+    if (persist) {
+      writeDatasetPromptDismissed();
+    }
+  }
+
+  function openDatasetModal() {
+    const modal = getDatasetModal();
+    if (!modal) {
+      return;
+    }
+    modal.hidden = false;
+    document.body.classList.add("is-modal-open");
+    const focusTarget = modal.querySelector(`${localDatasetDownloadSelector}, [data-dataset-manual-link], ${datasetDismissSelector}`);
+    focusTarget?.focus?.();
+  }
+
+  function initialiseDatasetPrompt() {
+    const modal = getDatasetModal();
+    if (!modal || readDatasetPromptDismissed()) {
+      return;
+    }
+    openDatasetModal();
+  }
+
+  async function copyDatasetCommand(button) {
+    const command = button.dataset.command || document.querySelector(datasetCommandTextSelector)?.textContent?.trim() || "";
+    if (!command) {
+      setDatasetModalStatus("No script command is available for this session.", "warn");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(command);
+      setDatasetModalStatus("Script command copied.", "ready");
+    } catch (error) {
+      setDatasetModalStatus("Copy failed. Select the command text manually.", "warn");
+    }
+  }
+
+  async function requestDatasetDownload(button) {
+    const endpoint = button.dataset.downloadEndpoint || "/local/download-dataset";
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = "Starting...";
+    setDatasetModalStatus("Starting dataset download...", "info");
+
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "X-Requested-With": "fetch",
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail || `Download failed with status ${response.status}`);
+      }
+      const logPath = payload.log_path ? ` Progress log: ${payload.log_path}` : "";
+      setDatasetModalStatus(`${payload.detail || "Dataset download started."}${logPath}`, "ready");
+      writeDatasetPromptDismissed();
+    } catch (error) {
+      setDatasetModalStatus(error.message || "Dataset download could not be started.", "warn");
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
   }
 
   function formatLabel(value) {
@@ -749,6 +861,27 @@
       return;
     }
 
+    const datasetDismiss = event.target.closest(datasetDismissSelector);
+    if (datasetDismiss) {
+      event.preventDefault();
+      closeDatasetModal();
+      return;
+    }
+
+    const datasetCopyCommand = event.target.closest(datasetCopyCommandSelector);
+    if (datasetCopyCommand) {
+      event.preventDefault();
+      void copyDatasetCommand(datasetCopyCommand);
+      return;
+    }
+
+    const localDatasetDownload = event.target.closest(localDatasetDownloadSelector);
+    if (localDatasetDownload) {
+      event.preventDefault();
+      void requestDatasetDownload(localDatasetDownload);
+      return;
+    }
+
     const tabButton = event.target.closest(tabButtonSelector);
     if (tabButton) {
       event.preventDefault();
@@ -848,8 +981,15 @@
     );
   });
 
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && getDatasetModal() && !getDatasetModal().hidden) {
+      closeDatasetModal();
+    }
+  });
+
   initialiseTheme();
   initialiseViewportMode();
+  initialiseDatasetPrompt();
   initialiseTableFilters(document);
   initialiseSortableTables(document);
   initialiseResizableTables(document);

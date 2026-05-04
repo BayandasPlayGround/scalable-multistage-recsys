@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>{{ title or "Amazon RecSys Platform" }}</title>
-    {% set static_version = "2026-05-03-viewport-toggle-1" %}
+    {% set static_version = "2026-05-04-dataset-prompt-1" %}
     <script>
       (() => {
         let viewportMode = "desktop";
@@ -94,5 +94,55 @@
         </main>
       </div>
     </div>
+
+    {% if dataset_status is defined %}
+    <div class="dataset-modal-backdrop" data-dataset-modal hidden>
+      <section class="dataset-modal" role="dialog" aria-modal="true" aria-labelledby="dataset-modal-title" aria-describedby="dataset-modal-description">
+        <button class="dataset-modal-close" type="button" data-dataset-dismiss aria-label="Close dataset reminder">Close</button>
+        <p class="section-kicker">Dataset Setup</p>
+        <h2 id="dataset-modal-title">Have you downloaded Amazon Reviews 2023?</h2>
+        <p id="dataset-modal-description" class="dataset-modal-copy">
+          {% if dataset_status.present %}
+          Dataset files are already detected for the configured categories. Confirm the location below, then continue to the analyst console.
+          {% else %}
+          Training needs the review files in the configured data folder before export-bundle can build a real recommender bundle.
+          {% endif %}
+        </p>
+
+        <div class="dataset-modal-details">
+          <div>
+            <span class="toolbar-label">Expected folder</span>
+            <code>{{ dataset_status.directory }}</code>
+          </div>
+          <div>
+            <span class="toolbar-label">Categories</span>
+            <span>{{ dataset_status.categories | join(", ") }}</span>
+          </div>
+        </div>
+
+        <div class="dataset-modal-actions">
+          {% if dataset_status.present %}
+          <button class="button-primary" type="button" data-dataset-dismiss>Continue</button>
+          {% else %}
+          <a class="button-secondary" href="{{ dataset_status.dataset_url }}" target="_blank" rel="noopener" data-dataset-manual-link>Open Dataset Page</a>
+          {% if can_download_dataset %}
+          <button class="button-primary" type="button" data-local-dataset-download data-download-endpoint="/local/download-dataset">Auto-download with Script</button>
+          {% endif %}
+          <button class="button-secondary" type="button" data-dataset-copy-command data-command="{{ dataset_status.download_command }}">Copy Script Command</button>
+          <button class="button-secondary" type="button" data-dataset-dismiss>Already Downloaded</button>
+          {% endif %}
+        </div>
+
+        {% if not dataset_status.present %}
+        <div class="dataset-command-block">
+          <span class="toolbar-label">Script command</span>
+          <code data-dataset-command-text>{{ dataset_status.download_command }}</code>
+        </div>
+        <p class="field-help">The files are large. The automatic option starts a local background process and writes progress to <code>artifacts/amazon_recsys/dataset_download.log</code>.</p>
+        <div class="dataset-modal-status" data-dataset-download-status hidden></div>
+        {% endif %}
+      </section>
+    </div>
+    {% endif %}
   </body>
 </html>

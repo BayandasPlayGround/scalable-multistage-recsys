@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
+from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.api.app import create_app
 
 
@@ -48,7 +51,7 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     assert "/static/favicon.svg?v=" in page_response.text
     assert "/static/style.css?v=" in page_response.text
     assert "/static/app.js?v=" in page_response.text
-    assert "2026-05-03-viewport-toggle-1" in page_response.text
+    assert "2026-05-04-dataset-prompt-1" in page_response.text
     assert 'name="color-scheme" content="light dark"' in page_response.text
     assert "amazon-recsys-theme" in page_response.text
     assert "data-theme-toggle" in page_response.text
@@ -56,7 +59,35 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     assert "data-viewport-mode-switch" in page_response.text
     assert 'data-viewport-mode-option="desktop"' in page_response.text
     assert 'data-viewport-mode-option="mobile"' in page_response.text
+    assert "data-dataset-modal" in page_response.text
+    assert "data-local-dataset-download" in page_response.text
+    assert "/local/download-dataset" in page_response.text
+    assert "download_amazon_reviews_2023.py" in page_response.text
     assert "data-enhanced-form" in page_response.text
     assert "Analyst Workflow Modes" in page_response.text
     assert 'data-tab-group="workspace"' in page_response.text
     assert 'data-tab-target="monitoring-workspace"' in page_response.text
+
+
+@pytest.mark.foundation
+@pytest.mark.serving
+def test_dataset_prompt_renders_when_dataset_is_already_present(synthetic_workspace: Path) -> None:
+    settings = AppSettings(
+        workspace_root=synthetic_workspace,
+        data_dir=Path("amazon_review_data"),
+        categories=("All_Beauty",),
+        metadata_download_if_missing=False,
+        use_mock_bundle_if_missing=True,
+        mlflow_enabled=False,
+        monitoring_enabled=False,
+    )
+    settings.ensure_runtime_directories()
+    client = TestClient(create_app(settings))
+
+    page_response = client.get("/")
+
+    assert page_response.status_code == 200
+    assert "data-dataset-modal" in page_response.text
+    assert "Dataset files are already detected" in page_response.text
+    assert "Auto-download with Script" not in page_response.text
+    assert "data-local-dataset-download" not in page_response.text

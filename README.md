@@ -45,6 +45,12 @@ This project uses the Amazon Reviews 2023 dataset. Download and documentation ar
 
 - [Amazon Reviews 2023](https://amazon-reviews-2023.github.io/)
 
+To download the default categories expected by this project into `amazon_review_data`, run:
+
+```powershell
+python scripts\download_amazon_reviews_2023.py
+```
+
 Please cite the dataset paper when using this project or derived experiments:
 
 ```bibtex

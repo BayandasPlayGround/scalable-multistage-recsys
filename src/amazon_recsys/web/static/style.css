@@ -2595,3 +2595,137 @@ button:focus-visible {
   padding-inline: 0.5rem;
   font-size: 0.94rem;
 }
+
+body.is-modal-open {
+  overflow: hidden;
+}
+
+.dataset-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 1.2rem;
+  background: rgba(8, 12, 18, 0.58);
+  backdrop-filter: blur(10px);
+}
+
+.dataset-modal-backdrop[hidden] {
+  display: none !important;
+}
+
+.dataset-modal {
+  position: relative;
+  display: grid;
+  gap: 1rem;
+  width: min(640px, 100%);
+  max-height: min(760px, 92vh);
+  overflow: auto;
+  padding: 1.35rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface-gradient-bright);
+  color: var(--ink);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.28);
+}
+
+.dataset-modal h2 {
+  max-width: 34rem;
+  font-size: 1.2rem;
+}
+
+.dataset-modal-copy {
+  margin: 0;
+  color: var(--muted-strong);
+  line-height: 1.6;
+}
+
+.dataset-modal-close {
+  position: absolute;
+  top: 0.9rem;
+  right: 0.9rem;
+  min-height: 34px;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.dataset-modal-details,
+.dataset-command-block {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+
+.dataset-modal-details div {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.dataset-modal-details code,
+.dataset-command-block code {
+  display: block;
+  max-width: 100%;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--code-border);
+  border-radius: 10px;
+  background: var(--code-bg);
+  color: var(--ink);
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 0.78rem;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.dataset-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+}
+
+.dataset-modal-actions .button-primary,
+.dataset-modal-actions .button-secondary {
+  min-height: 42px;
+}
+
+.dataset-modal-status {
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.dataset-modal-status[data-status-tone="ready"] {
+  border-color: rgba(28, 140, 87, 0.28);
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.dataset-modal-status[data-status-tone="warn"] {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+@media (max-width: 620px) {
+  .dataset-modal {
+    padding: 1.2rem;
+  }
+
+  .dataset-modal-actions .button-primary,
+  .dataset-modal-actions .button-secondary {
+    width: 100%;
+  }
+}
