@@ -103,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate Bicep template
-        uses: azure/cli@v2
+        uses: azure/cli@v3
         with:
           inlineScript: az bicep build --file infra/azure/bicep/main.bicep
       - uses: actions/setup-python@v5
