@@ -26,3 +26,6 @@ updates:
       time: "09:00"
       timezone: "Africa/Johannesburg"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "python"
+        versions: ["3.14*"]
