@@ -106,7 +106,7 @@ jobs:
         uses: azure/cli@v2
         with:
           inlineScript: az bicep build --file infra/azure/bicep/main.bicep
-      - uses: azure/setup-kubectl@v4
+      - uses: azure/setup-kubectl@v5
       - name: Validate Kubernetes deployment manifest
         run: kubectl apply --dry-run=client --validate=false -f infra/azure/aks/deployment.yaml
       - uses: actions/setup-python@v5
