@@ -7,7 +7,7 @@ name = "amazon-recsys"
 version = "0.1.0"
 description = "Package-owned Amazon recommender with bundle serving, monitoring, and notebook compatibility."
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.13,<3.14"
 dependencies = [
   "annoy",
   "fastapi",
@@ -67,7 +67,7 @@ markers = [
 ]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 140
 extend-exclude = [
   "Research",

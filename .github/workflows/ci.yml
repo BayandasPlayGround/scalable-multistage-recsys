@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
           cache: "pip"
       - name: Install Ruff
         run: |
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
           cache: "pip"
       - name: Install package
         run: |
@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
           cache: "pip"
       - name: Install security tools and package
         run: |
@@ -108,7 +108,7 @@ jobs:
           inlineScript: az bicep build --file infra/azure/bicep/main.bicep
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
       - name: Validate Kubernetes and Azure ML YAML files
         run: |
           python -m pip install --upgrade pip
