@@ -45,6 +45,12 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"amazon_recsys.web" = [
+  "static/*",
+  "templates/*.html",
+]
+
 [tool.pytest.ini_options]
 addopts = "-p no:cacheprovider -p no:tmpdir"
 testpaths = ["tests"]

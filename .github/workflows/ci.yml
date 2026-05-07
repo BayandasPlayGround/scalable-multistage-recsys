@@ -106,13 +106,10 @@ jobs:
         uses: azure/cli@v2
         with:
           inlineScript: az bicep build --file infra/azure/bicep/main.bicep
-      - uses: azure/setup-kubectl@v4
-      - name: Validate Kubernetes deployment manifest
-        run: kubectl apply --dry-run=client --validate=false -f infra/azure/aks/deployment.yaml
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Validate Azure ML YAML files
+      - name: Validate Kubernetes and Azure ML YAML files
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyyaml
@@ -120,10 +117,19 @@ jobs:
           from pathlib import Path
           import yaml
 
-          for path in [Path("infra/azure/aml/train-job.yml"), Path("infra/azure/aml/environment.yml")]:
+          yaml_files = [
+              Path("infra/azure/aks/deployment.yaml"),
+              Path("infra/azure/aml/train-job.yml"),
+              Path("infra/azure/aml/environment.yml"),
+          ]
+
+          for path in yaml_files:
               with path.open("r", encoding="utf-8") as handle:
-                  payload = yaml.safe_load(handle)
-              if not isinstance(payload, dict):
-                  raise SystemExit(f"{path} did not parse as a YAML mapping.")
+                  documents = list(yaml.safe_load_all(handle))
+              if not documents:
+                  raise SystemExit(f"{path} is empty.")
+              for index, document in enumerate(documents, start=1):
+                  if not isinstance(document, dict):
+                      raise SystemExit(f"{path} document {index} did not parse as a YAML mapping.")
               print(f"validated {path}")
           PY
