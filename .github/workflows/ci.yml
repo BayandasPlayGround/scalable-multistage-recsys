@@ -5,18 +5,125 @@ on:
   push:
     branches: ["main"]
   pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  lint:
+    name: Lint / Ruff
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+      - name: Install Ruff
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "ruff>=0.8,<1"
+      - name: Run Ruff
+        run: ruff check .
+
+  test:
+    name: Tests / Pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
       - name: Install package
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .[dev]
       - name: Run tests
         run: pytest -p no:cacheprovider
+
+  security:
+    name: Security / Source and dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Install security tools and package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install bandit pip-audit
+      - name: Scan source with Bandit
+        run: bandit -r src scripts app.py -x tests -lll -iii
+      - name: Audit project dependencies
+        run: pip-audit . --progress-spinner off
+
+  container-smoke:
+    name: Container / Build and smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime image
+        run: docker build -t amazon-recsys:${{ github.sha }} .
+      - name: Start runtime container
+        run: docker run -d --name amazon-recsys-ci -p 8000:8000 amazon-recsys:${{ github.sha }}
+      - name: Verify health and readiness endpoints
+        run: |
+          for attempt in {1..30}; do
+            if curl -fsS http://127.0.0.1:8000/health >/tmp/health.json; then
+              break
+            fi
+            sleep 2
+          done
+          cat /tmp/health.json
+          curl -fsS http://127.0.0.1:8000/ready
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs amazon-recsys-ci || true
+      - name: Stop runtime container
+        if: always()
+        run: docker rm -f amazon-recsys-ci || true
+
+  infra:
+    name: Infra / Azure manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Bicep template
+        uses: azure/cli@v2
+        with:
+          inlineScript: az bicep build --file infra/azure/bicep/main.bicep
+      - uses: azure/setup-kubectl@v4
+      - name: Validate Kubernetes deployment manifest
+        run: kubectl apply --dry-run=client --validate=false -f infra/azure/aks/deployment.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate Azure ML YAML files
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyyaml
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          for path in [Path("infra/azure/aml/train-job.yml"), Path("infra/azure/aml/environment.yml")]:
+              with path.open("r", encoding="utf-8") as handle:
+                  payload = yaml.safe_load(handle)
+              if not isinstance(payload, dict):
+                  raise SystemExit(f"{path} did not parse as a YAML mapping.")
+              print(f"validated {path}")
+          PY

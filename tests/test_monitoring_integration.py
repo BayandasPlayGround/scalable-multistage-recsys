@@ -111,7 +111,7 @@ def test_monitor_backfill_can_auto_simulate_recent_outcomes(test_settings, train
 @pytest.mark.data
 @pytest.mark.serving
 def test_monitoring_run_is_logged_to_mlflow(test_settings, train_export_activate) -> None:
-    mlflow = pytest.importorskip("mlflow")
+    pytest.importorskip("mlflow")
     from mlflow.tracking import MlflowClient
 
     tracking_dir = Path.cwd() / f"mlflow-monitoring-{uuid4().hex}"

@@ -9,6 +9,7 @@ This folder holds the detailed project documentation that used to live in the to
 - [Architecture Guide](architecture.md)
 - [Multistage Recsys Design](multistage-recsys-design.md)
 - [Running The App](running-the-app.md)
+- [Release Process](release-process.md)
 - [MLflow Guide](mlflow.md)
 - [Drift Monitoring Guide](monitoring.md)
 
@@ -18,7 +19,8 @@ This folder holds the detailed project documentation that used to live in the to
 2. [Architecture Guide](architecture.md)
 3. [Multistage Recsys Design](multistage-recsys-design.md)
 4. [MLflow Guide](mlflow.md)
-5. [Drift Monitoring Guide](monitoring.md)
+5. [Release Process](release-process.md)
+6. [Drift Monitoring Guide](monitoring.md)
 
 ## What Each File Covers
 
@@ -37,6 +39,11 @@ This folder holds the detailed project documentation that used to live in the to
   - beginner command walkthrough
   - local dev vs production-like mode
   - verification commands
+- `release-process.md`
+  - pull-request workflow for production changes
+  - required CI checks
+  - GitHub branch protection settings
+  - rollback notes
 - `mlflow.md`
   - local and production MLflow setup
   - exact commands

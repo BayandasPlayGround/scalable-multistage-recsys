@@ -160,6 +160,7 @@ Detailed guides live under [`docs/`](docs/README.md).
 - [Architecture Guide](docs/architecture.md)
 - [Multistage Recsys Design](docs/multistage-recsys-design.md)
 - [Running The App](docs/running-the-app.md)
+- [Release Process](docs/release-process.md)
 - [MLflow Guide](docs/mlflow.md)
 - [Drift Monitoring Guide](docs/monitoring.md)
 

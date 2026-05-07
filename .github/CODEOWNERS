@@ -1,0 +1,9 @@
+* @BayandasPlayGround
+
+/.github/ @BayandasPlayGround
+/Dockerfile @BayandasPlayGround
+/pyproject.toml @BayandasPlayGround
+/Requirements.txt @BayandasPlayGround
+/infra/ @BayandasPlayGround
+/src/ @BayandasPlayGround
+/tests/ @BayandasPlayGround

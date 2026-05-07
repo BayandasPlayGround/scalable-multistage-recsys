@@ -1963,7 +1963,6 @@ class TwoTowerRetrieverModel(tf.keras.Model):
         bce_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=outputs["logits"]))
         positive_mask = tf.squeeze(labels > 0.5, axis=-1)
         positive_users = tf.boolean_mask(outputs["user_embedding"], positive_mask)
-        positive_items = tf.boolean_mask(outputs["item_embedding"], positive_mask)
 
         def _compute_in_batch_loss() -> tf.Tensor:
             positive_users = tf.boolean_mask(outputs["user_embedding"], positive_mask)

@@ -1,4 +1,4 @@
-FROM python:3.13-slim-bookworm
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -10,7 +10,7 @@ COPY src ./src
 COPY app.py ./app.py
 COPY .env.example ./.env.example
 
-RUN pip install --upgrade pip && pip install .
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
 
 EXPOSE 8000
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, TypeAlias
 
 if TYPE_CHECKING:
-    from amazon_recsys.ml.core import PipelineConfig, PreparedArtifacts, RankerArtifacts, RetrieverArtifacts, ServingIndex, SplitArtifacts
+    from amazon_recsys.ml.core import PreparedArtifacts, RankerArtifacts, RetrieverArtifacts, ServingIndex, SplitArtifacts
 
 
 JSONValue: TypeAlias = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
