@@ -28,5 +28,5 @@ updates:
     open-pull-requests-limit: 5
     ignore:
       - dependency-name: "python"
-        versions: ["3.13*"] #dependency updates for python 3.13 
-        
+        versions: ["3.14*"] #dependency updates for python 3.14 
+
