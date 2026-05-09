@@ -220,6 +220,8 @@ def index(
     monitoring_summary = {}
     monitoring_history = []
     monitoring_trends = []
+    candidate_diagnostics_summary = {}
+    candidate_diagnostics_history = []
     available_users = []
     try:
         active_model = service.get_active_model()
@@ -229,6 +231,9 @@ def index(
         monitoring_summary = monitoring.to_dict() if monitoring is not None else {}
         monitoring_history = [item.to_dict() for item in monitoring_service.recent_summaries(limit=8)]
         monitoring_trends = _build_monitoring_trends(monitoring_history)
+        candidate_diagnostics = monitoring_service.latest_candidate_diagnostics()
+        candidate_diagnostics_summary = candidate_diagnostics or {}
+        candidate_diagnostics_history = monitoring_service.recent_candidate_diagnostics(limit=8)
         available_users = service.list_available_users(limit=250, min_history=3)
     except FileNotFoundError as exc:
         error = str(exc)
@@ -263,6 +268,8 @@ def index(
             "monitoring_history": monitoring_history,
             "monitoring_previous_summary": monitoring_history[-2] if len(monitoring_history) > 1 else {},
             "monitoring_trends": monitoring_trends,
+            "candidate_diagnostics_summary": candidate_diagnostics_summary,
+            "candidate_diagnostics_history": candidate_diagnostics_history,
             "recommendations": recommendations,
             "history": history,
             "available_users": available_users,

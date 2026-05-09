@@ -55,6 +55,11 @@ def test_training_bundle_round_trip(test_container, train_export_activate) -> No
     assert model.version == "fixture-bundle"
     assert summary.metric_files
     metric_file_names = {metric.file for metric in summary.metric_files}
+    assert "candidate_recall_by_category.csv" in metric_file_names
+    assert "candidate_recall_by_history_bucket.csv" in metric_file_names
+    assert "candidate_recall_by_source.csv" in metric_file_names
+    assert "candidate_recall_by_cold_start_type.csv" in metric_file_names
+    assert "candidate_recall_worst_slices.csv" in metric_file_names
     assert "candidate_union_recall_by_category.csv" in metric_file_names
     assert "candidate_union_recall_by_source.csv" in metric_file_names
     assert "candidate_union_recall_by_history_bucket.csv" in metric_file_names
@@ -86,6 +91,7 @@ def test_candidate_recall_diagnostics_break_down_categories_and_sources() -> Non
             {"example_id": 2, "label": 0, "rank": 1, "target_source_category": "All_Beauty", "history_length": 18, "target_price_bucket": "price_high", "from_cooccurrence": 1, "from_latent_cf": 0},
         ]
     )
+    candidates["cold_start_user_type"] = ["known_user_full_history", "known_user_full_history", "anonymous_no_history"]
 
     diagnostics = core.candidate_recall_diagnostics(
         candidates,
@@ -102,6 +108,27 @@ def test_candidate_recall_diagnostics_break_down_categories_and_sources() -> Non
     assert by_scope[("history_length_bucket", "11-25")]["hit_rate"] == pytest.approx(0.0)
     assert by_scope[("target_price_bucket", "price_low")]["positive_recoveries"] == 1
     assert by_scope[("candidate_source", "cooccurrence")]["positive_recoveries"] == 1
+    assert by_scope[("cold_start_user_type", "anonymous_no_history")]["hit_rate"] == pytest.approx(0.0)
+
+
+@pytest.mark.retrieval
+def test_history_normalization_accepts_common_sequence_shapes() -> None:
+    item_text_matrix = np.asarray(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+    expected = np.asarray([0.5, 0.5], dtype=np.float32)
+
+    np.testing.assert_allclose(core._mean_text_profile([1, 2], item_text_matrix), expected)
+    np.testing.assert_allclose(core._mean_text_profile((1, 2), item_text_matrix), expected)
+    np.testing.assert_allclose(core._mean_text_profile(np.asarray([1, 2]), item_text_matrix), expected)
+    np.testing.assert_allclose(core._mean_text_profile([], item_text_matrix), np.zeros((2,), dtype=np.float32))
+    np.testing.assert_array_equal(core._pad_history(np.asarray([1, 2, 3]), 2), np.asarray([2, 3], dtype=np.int32))
 
 
 @pytest.mark.retrieval

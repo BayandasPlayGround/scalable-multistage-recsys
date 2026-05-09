@@ -5,6 +5,10 @@
 {% set drift_status = monitoring_summary.status if monitoring_summary.status is defined else "unavailable" %}
 {% set drift_features = monitoring_summary.top_drifting_features if monitoring_summary.top_drifting_features is defined else [] %}
 {% set feature_drifts = monitoring_summary.feature_drifts if monitoring_summary.feature_drifts is defined else [] %}
+{% set candidate_overall = candidate_diagnostics_summary.overall if candidate_diagnostics_summary.overall is defined else [] %}
+{% set candidate_sources = candidate_diagnostics_summary.source_summary if candidate_diagnostics_summary.source_summary is defined else [] %}
+{% set candidate_cold_start = candidate_diagnostics_summary.cold_start_summary if candidate_diagnostics_summary.cold_start_summary is defined else [] %}
+{% set candidate_worst_slices = candidate_diagnostics_summary.worst_slices if candidate_diagnostics_summary.worst_slices is defined else [] %}
 {% set concept_drift = monitoring_summary.concept_drift if monitoring_summary.concept_drift is defined else {} %}
 {% set concept_k = concept_drift.monitored_k if concept_drift.monitored_k is defined else 10 %}
 {% set hit_key = "hit_rate_at_" ~ concept_k %}
@@ -514,6 +518,63 @@
           </div>
         </div>
       </div>
+
+      <section class="candidate-recovery-panel">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Candidate Recovery</p>
+            <h2>Recall diagnostics before ranker tuning</h2>
+          </div>
+          <span class="panel-badge">{{ candidate_diagnostics_summary.created_at if candidate_diagnostics_summary.created_at is defined else "not run" }}</span>
+        </div>
+        {% if candidate_diagnostics_summary %}
+        <div class="monitor-summary-grid">
+          {% for row in candidate_overall %}
+          <article class="stat-card"><span class="stat-label">{{ row.stage | replace("_", " ") }}</span><strong class="stat-value">{{ "%.3f"|format(row.hit_rate) if row.hit_rate is not none else "n/a" }}</strong><span class="stat-note">{{ row.scenario | replace("_", " ") }} | {{ row.examples }} examples</span></article>
+          {% endfor %}
+        </div>
+
+        <div class="content-grid qa-results-shell">
+          <article class="distribution-card">
+            <div class="panel-head"><div><p class="section-kicker">Worst Slices</p><h2>Where target recovery fails first</h2></div></div>
+            {% if candidate_worst_slices %}
+            <div class="table-wrap table-wrap-sticky table-wrap-monitoring">
+              <table class="data-table data-table-monitoring" data-resizable-table="candidate-worst-slices" data-default-widths="150,170,170,130,110,120">
+                <thead><tr><th>Stage</th><th>Scenario</th><th>Slice</th><th>Name</th><th>Examples</th><th>Hit rate</th></tr></thead>
+                <tbody>
+                  {% for row in candidate_worst_slices[:10] %}
+                  <tr><td>{{ row.stage | replace("_", " ") }}</td><td>{{ row.scenario | replace("_", " ") }}</td><td>{{ row.scope | replace("_", " ") }}</td><td>{{ row.name | replace("_", " ") }}</td><td class="numeric-column">{{ row.examples }}</td><td class="numeric-column">{{ "%.3f"|format(row.hit_rate) if row.hit_rate is not none else "n/a" }}</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+            <div class="empty-state empty-state-compact"><strong>No weak candidate slices are persisted yet.</strong><p>Run candidate diagnostics with persistence to populate this view.</p></div>
+            {% endif %}
+          </article>
+
+          <article class="distribution-card">
+            <div class="panel-head"><div><p class="section-kicker">Source Recovery Mix</p><h2>Which retrievers recover positives</h2></div></div>
+            {% if candidate_sources %}
+            <div class="table-wrap table-wrap-sticky table-wrap-monitoring">
+              <table class="data-table data-table-monitoring" data-resizable-table="candidate-source-recovery" data-default-widths="150,160,170,120,120">
+                <thead><tr><th>Source</th><th>Stage</th><th>Scenario</th><th>Hit rate</th><th>Recoveries</th></tr></thead>
+                <tbody>
+                  {% for row in candidate_sources[:12] %}
+                  <tr><td>{{ row.name | replace("_", " ") }}</td><td>{{ row.stage | replace("_", " ") }}</td><td>{{ row.scenario | replace("_", " ") }}</td><td class="numeric-column">{{ "%.3f"|format(row.hit_rate) if row.hit_rate is not none else "n/a" }}</td><td class="numeric-column">{{ row.positive_recoveries }}</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+            <div class="empty-state empty-state-compact"><strong>No source-level recovery rows are available.</strong><p>Candidate-source recall appears after persisted diagnostics run against the active bundle.</p></div>
+            {% endif %}
+          </article>
+        </div>
+        {% else %}
+        <div class="empty-state empty-state-compact"><strong>No candidate recovery diagnostics are persisted for this bundle.</strong><p>Run `python -m amazon_recsys.cli.main diagnose-candidates --bundle-version active --split test --sample-size 500 --persist`.</p></div>
+        {% endif %}
+      </section>
 
       {% if monitoring_trends %}
       <div class="trend-grid monitoring-trend-grid">

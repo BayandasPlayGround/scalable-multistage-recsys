@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 _UNAVAILABLE_WARNING_EMITTED = False
-_DIMENSION_COLUMNS = {"K", "split", "stage", "variant"}
+_DIMENSION_COLUMNS = {"K", "split", "stage", "variant", "bundle_version", "scenario", "scope", "name"}
 
 
 def _stringify(value: object) -> str:
@@ -128,12 +128,13 @@ class MLflowTracker:
 
     def _log_metric_frames(self, eval_dir: Path) -> None:
         assert mlflow is not None
-        for csv_path in sorted(eval_dir.glob("*_metrics.csv")):
+        metric_paths = sorted({*eval_dir.glob("*_metrics.csv"), *eval_dir.glob("candidate_recall*.csv")})
+        for csv_path in metric_paths:
             frame = pd.read_csv(csv_path)
             base_name = csv_path.stem.removesuffix("_metrics")
             for _, row in frame.iterrows():
                 prefix = [base_name]
-                for column in ("variant", "stage", "split"):
+                for column in ("variant", "stage", "split", "scenario", "scope", "name"):
                     raw_value = row.get(column)
                     if raw_value is not None and not pd.isna(raw_value):
                         prefix.append(str(raw_value))
@@ -279,6 +280,49 @@ class MLflowTracker:
             mlflow.log_metric("drift.concept.performance_drop", float(summary.concept_drift.performance_drop))
             for path in artifact_paths.values():
                 self._log_artifact_if_exists(Path(path), artifact_path="monitoring")
+            return MlflowRunInfo(
+                run_id=run.info.run_id,
+                experiment_name=f"{self.config.experiment_name}-monitoring",
+                tracking_uri=self.config.tracking_uri,
+            )
+
+    def log_candidate_diagnostics(
+        self,
+        summary: dict[str, object],
+        artifact_paths: dict[str, Path],
+    ) -> MlflowRunInfo | None:
+        if not self._configure_monitoring():
+            return None
+        assert mlflow is not None
+        bundle_version = str(summary.get("bundle_version", "unknown"))
+        created_at = str(summary.get("created_at", ""))
+        with mlflow.start_run(run_name=f"candidate-recall-{bundle_version}-{created_at}") as run:
+            mlflow.set_tags(
+                {
+                    "phase": "candidate_diagnostics",
+                    "bundle_version": bundle_version,
+                    "split": str(summary.get("split", "")),
+                    "created_at": created_at,
+                }
+            )
+            mlflow.log_metric("candidate_recall.examples", float(summary.get("sample_size", 0) or 0))
+            mlflow.log_metric("candidate_recall.candidate_rows", float(summary.get("candidate_rows", 0) or 0))
+            mlflow.log_metric("candidate_recall.ranker_candidate_rows", float(summary.get("ranker_candidate_rows", 0) or 0))
+            for row in summary.get("overall", []) or []:
+                if not isinstance(row, dict):
+                    continue
+                metric_prefix = ".".join(
+                    [
+                        "candidate_recall",
+                        str(row.get("stage", "stage")),
+                        str(row.get("scenario", "scenario")),
+                    ]
+                )
+                hit_rate = _numeric_value(row.get("hit_rate"))
+                if hit_rate is not None:
+                    mlflow.log_metric(f"{metric_prefix}.hit_rate", hit_rate)
+            for path in artifact_paths.values():
+                self._log_artifact_if_exists(Path(path), artifact_path="monitoring/candidate_recall")
             return MlflowRunInfo(
                 run_id=run.info.run_id,
                 experiment_name=f"{self.config.experiment_name}-monitoring",
