@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEFAULT_CATEGORIES = ("All_Beauty", "Automotive", "Industrial_and_Scientific")
 VALID_RUN_PROFILES = {"debug", "quality", "quality-neural", "full"}
 VALID_RANKER_BACKENDS = {"xgboost", "dlrm"}
+VALID_NEURAL_RETRIEVER_VARIANTS = {"two_tower", "dat_lite"}
 
 
 def default_workspace_root() -> Path:
@@ -37,6 +38,9 @@ class TrainingConfig(BaseModel):
 
 class RetrievalConfig(BaseModel):
     enable_neural_retriever: bool = False
+    neural_retriever_variant: str = "two_tower"
+    dat_mimic_weight: float = 0.10
+    dat_category_alignment_weight: float = 0.05
     retrieval_top_k: int = 50
     candidate_union_top_k: int = 75
     candidate_union_batch_size: int = 100
@@ -163,6 +167,9 @@ class AppSettings(BaseSettings):
     split_eval_example_cap: int | None = None
 
     enable_neural_retriever: bool = False
+    neural_retriever_variant: str = "two_tower"
+    dat_mimic_weight: float = 0.10
+    dat_category_alignment_weight: float = 0.05
     retrieval_top_k: int = 50
     candidate_union_top_k: int = 75
     candidate_union_batch_size: int = 100
@@ -209,6 +216,13 @@ class AppSettings(BaseSettings):
     def _validate_ranker_backend(cls, value: str) -> str:
         if value not in VALID_RANKER_BACKENDS:
             raise ValueError(f"ranker_backend must be one of {sorted(VALID_RANKER_BACKENDS)}.")
+        return value
+
+    @field_validator("neural_retriever_variant")
+    @classmethod
+    def _validate_neural_retriever_variant(cls, value: str) -> str:
+        if value not in VALID_NEURAL_RETRIEVER_VARIANTS:
+            raise ValueError(f"neural_retriever_variant must be one of {sorted(VALID_NEURAL_RETRIEVER_VARIANTS)}.")
         return value
 
     @field_validator("dev_fraction")
@@ -319,6 +333,9 @@ class AppSettings(BaseSettings):
     def retrieval(self) -> RetrievalConfig:
         return RetrievalConfig(
             enable_neural_retriever=self.enable_neural_retriever,
+            neural_retriever_variant=self.neural_retriever_variant,
+            dat_mimic_weight=self.dat_mimic_weight,
+            dat_category_alignment_weight=self.dat_category_alignment_weight,
             retrieval_top_k=self.retrieval_top_k,
             candidate_union_top_k=self.candidate_union_top_k,
             candidate_union_batch_size=self.candidate_union_batch_size,

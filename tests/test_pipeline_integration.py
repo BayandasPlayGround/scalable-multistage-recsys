@@ -364,6 +364,62 @@ def test_ranker_candidate_pruning_preserves_reserved_latent_candidates() -> None
 
 
 @pytest.mark.retrieval
+def test_source_balanced_union_reserves_neural_candidates_when_available() -> None:
+    config = core.PipelineConfig(
+        categories=("Automotive",),
+        candidate_source_balance_enabled=True,
+        ranker_candidate_top_k=10,
+    )
+    candidates = pd.DataFrame(
+        [
+            {
+                "example_id": 1,
+                "item_idx": item_idx,
+                "retrieval_score": 1.0 / rank,
+                "union_score": 1.0 / rank,
+                "source_count": 1,
+                "from_cooccurrence": 1,
+                "rank_cooccurrence": rank,
+                "from_latent_cf": 0,
+                "rank_latent_cf": 99,
+                "from_content_based": 0,
+                "rank_content_based": 99,
+                "from_two_tower": 0,
+                "rank_two_tower": 99,
+                "from_popularity": 0,
+                "rank_popularity": 99,
+            }
+            for rank, item_idx in enumerate(range(100, 120), start=1)
+        ]
+        + [
+            {
+                "example_id": 1,
+                "item_idx": 500 + rank,
+                "retrieval_score": 0.001,
+                "union_score": 0.001,
+                "source_count": 1,
+                "from_cooccurrence": 0,
+                "rank_cooccurrence": 99,
+                "from_latent_cf": 0,
+                "rank_latent_cf": 99,
+                "from_content_based": 0,
+                "rank_content_based": 99,
+                "from_two_tower": 1,
+                "rank_two_tower": rank,
+                "from_popularity": 0,
+                "rank_popularity": 99,
+            }
+            for rank in range(1, 4)
+        ]
+    )
+
+    pruned = core._prune_ranker_candidates(candidates, config)
+
+    assert len(pruned) == 10
+    assert int(pruned["from_two_tower"].sum()) >= 2
+
+
+@pytest.mark.retrieval
 def test_multi_trigger_content_retrieval_uses_recent_item_neighbors(workspace_dir: Path) -> None:
     config = core.PipelineConfig(
         base_dir=workspace_dir,
@@ -561,8 +617,116 @@ def test_quality_profile_raises_debug_sized_candidate_budgets(test_settings, cap
 
 
 @pytest.mark.retrieval
+def test_quality_neural_profile_defaults_to_dat_lite_and_neural_budget_floors(test_settings, caplog) -> None:
+    settings = test_settings.model_copy(update={"run_profile": "quality-neural"})
+
+    with caplog.at_level("WARNING"):
+        config = pipeline_config_from_settings(settings)
+
+    assert config.enable_neural_retriever is True
+    assert config.neural_retriever_variant == "dat_lite"
+    assert config.candidate_union_top_k == 650
+    assert config.ranker_candidate_top_k == 250
+    assert config.neural_candidate_k == 250
+    assert "Candidate budget settings were below the quality-neural profile floor" in caplog.text
+
+    override = pipeline_config_from_settings(settings.model_copy(update={"neural_retriever_variant": "two_tower"}))
+    assert override.neural_retriever_variant == "two_tower"
+
+
+@pytest.mark.retrieval
+def test_train_retrievers_uses_configured_neural_variant(monkeypatch) -> None:
+    config = SimpleNamespace(enable_neural_retriever=True, neural_retriever_variant="dat_lite")
+    prepared = SimpleNamespace(config=config)
+    split_artifacts = object()
+    captured: list[str] = []
+
+    monkeypatch.setattr(core, "train_content_retriever", lambda *_args, **_kwargs: "content")
+    monkeypatch.setattr(core, "train_latent_cf_retriever", lambda *_args, **_kwargs: "latent")
+
+    def fake_train_retriever(*_args, variant: str):
+        captured.append(variant)
+        return SimpleNamespace(variant=variant, metrics=pd.DataFrame([{"recall": 0.1}]), metadata={})
+
+    monkeypatch.setattr(core, "train_retriever", fake_train_retriever)
+
+    retrievers = core.train_retrievers(prepared, split_artifacts)
+
+    assert captured == ["dat_lite"]
+    assert retrievers["two_tower"].variant == "dat_lite"
+    assert retrievers["two_tower"].metadata["source_alias"] == "two_tower"
+
+
+@pytest.mark.retrieval
+def test_dat_lite_retriever_maps_to_stable_two_tower_source(monkeypatch) -> None:
+    config = core.PipelineConfig(categories=("Automotive",), neural_candidate_k=2)
+    prepared = SimpleNamespace(config=config)
+    split_artifacts = SimpleNamespace(config=config)
+    examples = pd.DataFrame(
+        [
+            {
+                "example_id": 1,
+                "split": "test",
+                "user_id": "u1",
+                "user_idx": 1,
+                "history_item_idxs": [1],
+                "target_item_idx": 2,
+                "target_parent_asin": "A2",
+                "target_timestamp": pd.Timestamp("2026-01-01"),
+                "target_source_category": "Automotive",
+                "history_length": 1,
+                "user_interaction_count": 1.0,
+                "user_mean_rating": 5.0,
+                "user_verified_rate": 1.0,
+                "days_since_last": 1.0,
+                "avg_days_between": 1.0,
+                "pref_Automotive": 1.0,
+            }
+        ]
+    )
+    retriever = SimpleNamespace(variant="dat_lite")
+
+    monkeypatch.setattr(core, "item_item_cooccurrence_candidates", lambda *_args, **_kwargs: core._empty_candidate_frame())
+    monkeypatch.setattr(core, "popularity_by_category_candidates", lambda *_args, **_kwargs: core._empty_candidate_frame())
+
+    def fake_generate_candidates(*_args, **_kwargs):
+        return pd.DataFrame(
+            [
+                {
+                    "example_id": 1,
+                    "split": "test",
+                    "user_id": "u1",
+                    "item_idx": 2,
+                    "retrieval_score": 1.0,
+                    "rank": 1,
+                    "label": 1,
+                    "target_item_idx": 2,
+                    "source": "dat_lite",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(core, "generate_candidates", fake_generate_candidates)
+
+    frames = core._source_candidate_frames(prepared, split_artifacts, {"dat_lite": retriever}, examples, inject_target_if_missing=False)
+
+    assert not frames["two_tower"].empty
+    assert set(frames["two_tower"]["source"]) == {"two_tower"}
+
+
+@pytest.mark.retrieval
+def test_select_embedding_retriever_prefers_dat_lite() -> None:
+    dat_lite = SimpleNamespace(variant="dat_lite")
+    latent = SimpleNamespace(variant="latent_cf")
+
+    selected = core._select_embedding_retriever({"latent_cf": latent, "two_tower": dat_lite})
+
+    assert selected is dat_lite
+
+
+@pytest.mark.retrieval
 def test_neural_retriever_failures_raise_when_enabled(monkeypatch) -> None:
-    prepared = SimpleNamespace(config=SimpleNamespace(enable_neural_retriever=True))
+    prepared = SimpleNamespace(config=SimpleNamespace(enable_neural_retriever=True, neural_retriever_variant="two_tower"))
     split_artifacts = object()
 
     monkeypatch.setattr(core, "train_content_retriever", lambda *_args, **_kwargs: "content")

@@ -75,6 +75,9 @@ def pipeline_config_from_settings(settings: AppSettings) -> core.PipelineConfig:
         split_eval_example_cap=settings.training.split_eval_example_cap,
         metadata_download_if_missing=settings.data.metadata_download_if_missing,
         enable_neural_retriever=settings.retrieval.enable_neural_retriever,
+        neural_retriever_variant=settings.retrieval.neural_retriever_variant,
+        dat_mimic_weight=settings.retrieval.dat_mimic_weight,
+        dat_category_alignment_weight=settings.retrieval.dat_category_alignment_weight,
         retrieval_top_k=settings.retrieval.retrieval_top_k,
         candidate_union_top_k=settings.retrieval.candidate_union_top_k,
         candidate_union_batch_size=settings.retrieval.candidate_union_batch_size,
@@ -99,6 +102,12 @@ def pipeline_config_from_settings(settings: AppSettings) -> core.PipelineConfig:
         xgb_colsample_bytree=settings.ranking.xgb_colsample_bytree,
     )
     config = core.apply_run_profile(config)
+    if "neural_retriever_variant" in getattr(settings, "model_fields_set", set()):
+        config.neural_retriever_variant = settings.retrieval.neural_retriever_variant
+    if "dat_mimic_weight" in getattr(settings, "model_fields_set", set()):
+        config.dat_mimic_weight = settings.retrieval.dat_mimic_weight
+    if "dat_category_alignment_weight" in getattr(settings, "model_fields_set", set()):
+        config.dat_category_alignment_weight = settings.retrieval.dat_category_alignment_weight
     _enforce_profile_candidate_budget_floor(config)
     return config
 
@@ -114,21 +123,21 @@ def _enforce_profile_candidate_budget_floor(config: core.PipelineConfig) -> None
             "popularity_backfill_k": 100,
         },
         "quality-neural": {
-            "candidate_union_top_k": 500,
-            "ranker_candidate_top_k": 200,
+            "candidate_union_top_k": 650,
+            "ranker_candidate_top_k": 250,
             "cooccurrence_candidate_k": 250,
             "latent_cf_candidate_k": 250,
             "content_candidate_k": 250,
-            "neural_candidate_k": 150,
+            "neural_candidate_k": 250,
             "popularity_backfill_k": 100,
         },
         "full": {
-            "candidate_union_top_k": 500,
-            "ranker_candidate_top_k": 200,
+            "candidate_union_top_k": 650,
+            "ranker_candidate_top_k": 250,
             "cooccurrence_candidate_k": 250,
             "latent_cf_candidate_k": 250,
             "content_candidate_k": 250,
-            "neural_candidate_k": 150,
+            "neural_candidate_k": 250,
             "popularity_backfill_k": 100,
         },
     }
@@ -193,11 +202,12 @@ class PackageTrainingPipeline:
             force_rebuild,
         )
         LOGGER.info(
-            "Training limits: dev_mode=%s dev_fraction=%s k_core=%s neural_retriever=%s retriever_cap=%s ranker_cap=%s eval_user_cap=%s",
+            "Training limits: dev_mode=%s dev_fraction=%s k_core=%s neural_retriever=%s neural_variant=%s retriever_cap=%s ranker_cap=%s eval_user_cap=%s",
             config.dev_mode,
             config.dev_fraction,
             config.k_core,
             config.enable_neural_retriever,
+            config.neural_retriever_variant,
             config.retriever_train_example_cap,
             config.ranker_train_example_cap,
             config.eval_user_cap,

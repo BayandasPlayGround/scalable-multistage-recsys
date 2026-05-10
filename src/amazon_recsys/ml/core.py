@@ -95,6 +95,7 @@ class PipelineConfig:
     retriever_logit_scale: float = 8.0
     persist_encoder_models: bool = False
     enable_neural_retriever: bool = False
+    neural_retriever_variant: str = "two_tower"
     in_batch_weight: float = 0.15
     dat_mimic_weight: float = 0.10
     dat_category_alignment_weight: float = 0.05
@@ -148,6 +149,9 @@ class PipelineConfig:
         valid_ranker_backends = {"xgboost", "dlrm"}
         if self.ranker_backend not in valid_ranker_backends:
             raise ValueError(f"ranker_backend must be one of {sorted(valid_ranker_backends)}.")
+        valid_neural_variants = {"two_tower", "dat_lite"}
+        if self.neural_retriever_variant not in valid_neural_variants:
+            raise ValueError(f"neural_retriever_variant must be one of {sorted(valid_neural_variants)}.")
         if float(self.dev_hard_negative_multiplier) <= 0 or float(self.dev_neutral_multiplier) <= 0:
             raise ValueError("Dev sampling multipliers must be positive.")
         if int(self.retriever_validation_negatives_per_positive) <= 0:
@@ -156,6 +160,8 @@ class PipelineConfig:
             raise ValueError("retriever_quality_min_history must be at least 1.")
         if float(self.retriever_logit_scale) <= 0:
             raise ValueError("retriever_logit_scale must be positive.")
+        if float(self.dat_mimic_weight) < 0 or float(self.dat_category_alignment_weight) < 0:
+            raise ValueError("DAT loss weights must be non-negative.")
 
     @property
     def data_dir(self) -> Path:
@@ -355,18 +361,20 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "retriever_train_example_cap": 100_000,
             "retriever_quality_min_history": 3,
             "enable_neural_retriever": True,
+            "neural_retriever_variant": "dat_lite",
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
             "candidate_source_balance_enabled": True,
             "vector_retriever_trigger_count": 5,
             "eval_user_cap": 2_000,
-            "candidate_union_top_k": 500,
+            "candidate_union_top_k": 650,
             "candidate_union_batch_size": 500,
             "cooccurrence_candidate_k": 250,
             "latent_cf_candidate_k": 250,
             "content_candidate_k": 250,
+            "neural_candidate_k": 250,
             "popularity_backfill_k": 100,
-            "ranker_candidate_top_k": 200,
+            "ranker_candidate_top_k": 250,
             "ranker_train_example_cap": 5_000,
             "ranker_val_example_cap": 1_000,
             "split_eval_example_cap": 2_000,
@@ -376,18 +384,20 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "retriever_train_example_cap": None,
             "retriever_quality_min_history": 3,
             "enable_neural_retriever": True,
+            "neural_retriever_variant": "dat_lite",
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
             "candidate_source_balance_enabled": True,
             "vector_retriever_trigger_count": 5,
             "eval_user_cap": None,
-            "candidate_union_top_k": 500,
+            "candidate_union_top_k": 650,
             "candidate_union_batch_size": 1_000,
             "cooccurrence_candidate_k": 250,
             "latent_cf_candidate_k": 250,
             "content_candidate_k": 250,
+            "neural_candidate_k": 250,
             "popularity_backfill_k": 100,
-            "ranker_candidate_top_k": 200,
+            "ranker_candidate_top_k": 250,
             "ranker_train_example_cap": 50_000,
             "ranker_val_example_cap": 5_000,
             "split_eval_example_cap": None,
@@ -1278,9 +1288,29 @@ def prepare_corpus(
     )
 
 
-def _sample_training_examples(df: pd.DataFrame, cap: int, seed: int) -> pd.DataFrame:
+def _sample_training_examples(df: pd.DataFrame, cap: int, seed: int, *, category_balanced: bool = False) -> pd.DataFrame:
     if len(df) <= cap:
         return df.reset_index(drop=True)
+    if category_balanced:
+        sampled_parts: list[pd.DataFrame] = []
+        rng = np.random.default_rng(seed)
+        grouped = list(df.groupby("target_source_category", group_keys=False))
+        quota_base, remainder = divmod(cap, max(len(grouped), 1))
+        for category_index, (_, group) in enumerate(grouped):
+            desired = quota_base + (1 if category_index < remainder else 0)
+            if desired <= 0:
+                continue
+            sampled_parts.append(group.sample(n=min(desired, len(group)), random_state=int(rng.integers(0, 1_000_000))))
+        sampled = pd.concat(sampled_parts, ignore_index=True) if sampled_parts else df.iloc[0:0].copy()
+        if len(sampled) < cap:
+            sampled_ids = set(sampled["example_id"])
+            remainder_frame = df[~df["example_id"].isin(sampled_ids)]
+            if not remainder_frame.empty:
+                extra = remainder_frame.sample(n=min(cap - len(sampled), len(remainder_frame)), random_state=seed)
+                sampled = pd.concat([sampled, extra], ignore_index=True)
+        if len(sampled) > cap:
+            sampled = sampled.sample(n=cap, random_state=seed)
+        return sampled.reset_index(drop=True)
     sampled_parts: list[pd.DataFrame] = []
     target_month = (
         pd.to_datetime(df["target_timestamp"], utc=True, errors="coerce")
@@ -2875,7 +2905,13 @@ def train_retriever(
         raise ValueError("variant must be 'two_tower' or 'dat_lite'")
     train_examples = _filter_retriever_examples(split_artifacts.train_examples, config)
     if config.retriever_train_example_cap is not None and len(train_examples) > config.retriever_train_example_cap:
-        train_examples = _sample_training_examples(train_examples, config.retriever_train_example_cap, config.seed)
+        category_balanced = variant == "dat_lite" and config.run_profile in {"quality-neural", "full"}
+        train_examples = _sample_training_examples(
+            train_examples,
+            config.retriever_train_example_cap,
+            config.seed,
+            category_balanced=category_balanced,
+        )
         print(f"Retriever training capped to {len(train_examples):,} base examples for notebook-safe memory usage.")
     val_examples = _filter_retriever_examples(split_artifacts.val_examples, config)
     if config.eval_user_cap is not None and len(val_examples) > config.eval_user_cap:
@@ -3035,15 +3071,18 @@ def train_retrievers(prepared: PreparedArtifacts, split_artifacts: SplitArtifact
     retrievers["latent_cf"] = train_latent_cf_retriever(prepared, split_artifacts)
     LOGGER.info("Latent collaborative-filtering retriever complete")
     if prepared.config.enable_neural_retriever:
-        LOGGER.info("Training neural two-tower retriever")
-        neural_retriever = train_retriever(prepared, split_artifacts, variant="two_tower")
+        neural_variant = prepared.config.neural_retriever_variant
+        LOGGER.info("Training neural retriever: variant=%s source_alias=two_tower", neural_variant)
+        neural_retriever = train_retriever(prepared, split_artifacts, variant=neural_variant)
         if _retriever_recovers_positives(neural_retriever.metrics):
+            neural_retriever.metadata["source_alias"] = "two_tower"
             retrievers["two_tower"] = neural_retriever
-            LOGGER.info("Neural two-tower retriever complete and enabled for candidate union")
+            LOGGER.info("Neural retriever complete and enabled for candidate union: variant=%s source_alias=two_tower", neural_variant)
         else:
             LOGGER.warning(
-                "Neural two-tower retriever completed but recovered no positives in evaluation. "
-                "It will be logged for diagnostics but excluded from candidate union."
+                "Neural retriever completed but recovered no positives in evaluation: variant=%s. "
+                "It will be logged for diagnostics but excluded from candidate union.",
+                neural_variant,
             )
     else:
         LOGGER.info("Skipping two_tower retriever because enable_neural_retriever is false")
@@ -3064,6 +3103,17 @@ def _candidate_source_budgets(config: PipelineConfig) -> dict[str, int]:
         "two_tower": int(config.neural_candidate_k),
         "popularity": int(config.popularity_backfill_k),
     }
+
+
+def _neural_retriever_from_map(retrievers: dict[str, RetrieverArtifacts]) -> RetrieverArtifacts | None:
+    for key in ("two_tower", "dat_lite"):
+        retriever = retrievers.get(key)
+        if retriever is not None:
+            return retriever
+    for retriever in retrievers.values():
+        if getattr(retriever, "variant", "") in {"two_tower", "dat_lite"}:
+            return retriever
+    return None
 
 
 def _empty_candidate_frame() -> pd.DataFrame:
@@ -3165,12 +3215,13 @@ def _source_candidate_frames(
         )
     else:
         frames["content_based"] = _normalize_candidate_frame(None, "content_based")
-    if "two_tower" in retrievers:
+    neural_retriever = _neural_retriever_from_map(retrievers)
+    if neural_retriever is not None:
         frames["two_tower"] = _normalize_candidate_frame(
             generate_candidates(
                 prepared,
                 split_artifacts,
-                retrievers["two_tower"],
+                neural_retriever,
                 examples,
                 top_k=budgets["two_tower"],
                 inject_target_if_missing=inject_target_if_missing,
@@ -3208,16 +3259,27 @@ def _candidate_metadata_from_example(example: pd.Series) -> Record:
     }
 
 
-def _candidate_source_balance_quotas(top_k: int) -> dict[str, int]:
-    fractions = {
-        "cooccurrence": 0.40,
-        "latent_cf": 0.25,
-        "content_based": 0.20,
-        "popularity": 0.15,
-    }
+def _candidate_source_balance_quotas(top_k: int, *, include_neural: bool = False) -> dict[str, int]:
+    if include_neural:
+        fractions = {
+            "cooccurrence": 0.30,
+            "latent_cf": 0.20,
+            "content_based": 0.15,
+            "two_tower": 0.20,
+            "popularity": 0.15,
+        }
+        source_order = ("cooccurrence", "latent_cf", "content_based", "two_tower", "popularity")
+    else:
+        fractions = {
+            "cooccurrence": 0.40,
+            "latent_cf": 0.25,
+            "content_based": 0.20,
+            "popularity": 0.15,
+        }
+        source_order = ("cooccurrence", "latent_cf", "content_based", "popularity")
     quotas = {source_name: int(math.floor(top_k * fraction)) for source_name, fraction in fractions.items()}
     remainder = max(top_k - sum(quotas.values()), 0)
-    for source_name in ("cooccurrence", "latent_cf", "content_based", "popularity"):
+    for source_name in source_order:
         if remainder <= 0:
             break
         quotas[source_name] += 1
@@ -3247,7 +3309,10 @@ def _select_candidate_union_rows(example_rows: pd.DataFrame, config: PipelineCon
         return sorted_rows.head(top_k).copy()
     selected_items: set[int] = set()
     selected_rows: list[Record] = []
-    quotas = _candidate_source_balance_quotas(top_k)
+    include_neural = False
+    if "from_two_tower" in example_rows.columns:
+        include_neural = bool(pd.to_numeric(example_rows["from_two_tower"], errors="coerce").fillna(0).astype(int).sum() > 0)
+    quotas = _candidate_source_balance_quotas(top_k, include_neural=include_neural)
 
     def _selected_source_count(source_name: str) -> int:
         flag_column = f"from_{source_name}"
@@ -4361,7 +4426,10 @@ def _rebalance_ranker_candidates(candidates: pd.DataFrame, negatives_per_positiv
 def _select_embedding_retriever(retrievers: RetrieverArtifacts | dict[str, RetrieverArtifacts]) -> RetrieverArtifacts:
     if isinstance(retrievers, RetrieverArtifacts):
         return retrievers
-    for key in ["two_tower", "latent_cf", "content_based"]:
+    for retriever in retrievers.values():
+        if getattr(retriever, "variant", "") == "dat_lite":
+            return retriever
+    for key in ["dat_lite", "two_tower", "latent_cf", "content_based"]:
         if key in retrievers:
             return retrievers[key]
     return next(iter(retrievers.values()))
@@ -5128,6 +5196,9 @@ def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
             {"name": "retriever_logit_scale", "value": config.retriever_logit_scale},
             {"name": "persist_encoder_models", "value": config.persist_encoder_models},
             {"name": "enable_neural_retriever", "value": config.enable_neural_retriever},
+            {"name": "neural_retriever_variant", "value": config.neural_retriever_variant},
+            {"name": "dat_mimic_weight", "value": config.dat_mimic_weight},
+            {"name": "dat_category_alignment_weight", "value": config.dat_category_alignment_weight},
             {"name": "retrieval_top_k", "value": config.retrieval_top_k},
             {"name": "cooccurrence_candidate_k", "value": config.cooccurrence_candidate_k},
             {"name": "latent_cf_candidate_k", "value": config.latent_cf_candidate_k},
