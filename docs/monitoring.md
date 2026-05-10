@@ -77,14 +77,18 @@ CLI:
 - `python -m amazon_recsys.cli.main ingest-outcomes --source ...`
 - `python -m amazon_recsys.cli.main monitor-drift --window-start ... --window-end ...`
 - `python -m amazon_recsys.cli.main monitor-backfill --days N`
+- `python -m amazon_recsys.cli.main diagnose-candidates --bundle-version active --split test --sample-size 500 --persist`
 
 API:
 
 - `GET /monitoring/drift/summary`
+- `GET /monitoring/candidate-recall/summary`
+- `GET /monitoring/candidate-recall/history`
 
 UI:
 
 - the dashboard monitoring panel shows the latest persisted drift summary for the active bundle
+- the candidate recovery panel shows persisted active-bundle recall by category, history length, source, and cold-start scenario
 
 ## What Is Measured
 
@@ -124,6 +128,15 @@ Current metrics:
 - `mrr@K`
 - `purchase_rate@K`
 - `cold_start_hit_rate@K`
+
+### Candidate Recovery Diagnostics
+
+Candidate recovery diagnostics run before ranker tuning. They measure whether the held-out target reaches the candidate set at two stages:
+
+- `candidate_union`
+- `ranker_candidates`
+
+Persisted slices include target category, history-length bucket, candidate source, and cold-start user type.
 
 ## Relevant Environment Variables
 

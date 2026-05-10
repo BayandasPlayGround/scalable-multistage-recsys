@@ -39,6 +39,12 @@ def collect_evaluation_summary(pipeline_config: core.PipelineConfig) -> Evaluati
         {
             *eval_dir.glob("*_metrics.csv"),
             *(eval_dir / name for name in [
+                "candidate_recall_diagnostics.csv",
+                "candidate_recall_by_category.csv",
+                "candidate_recall_by_history_bucket.csv",
+                "candidate_recall_by_source.csv",
+                "candidate_recall_by_cold_start_type.csv",
+                "candidate_recall_worst_slices.csv",
                 "candidate_union_recall_by_category.csv",
                 "candidate_union_recall_by_source.csv",
                 "candidate_union_recall_by_history_bucket.csv",

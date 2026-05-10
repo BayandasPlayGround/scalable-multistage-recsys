@@ -36,6 +36,10 @@ def test_monitoring_summary_is_persisted_and_exposed_via_api(test_settings, trai
 
     bundle = train_export_activate(container, version="monitoring-fixture")
     container.recommendation_service.refresh()
+    candidate_summary = container.monitoring_service.latest_candidate_diagnostics(bundle.manifest.version)
+    assert candidate_summary is not None
+    assert candidate_summary["bundle_version"] == bundle.manifest.version
+    assert candidate_summary["worst_slices"]
 
     for user_id in ("u1", "u2"):
         items = container.recommendation_service.recommend(user_id=user_id, top_k=5)
@@ -65,18 +69,26 @@ def test_monitoring_summary_is_persisted_and_exposed_via_api(test_settings, trai
     client = TestClient(create_app(settings))
     response = client.get("/monitoring/drift/summary")
     history_response = client.get("/monitoring/drift/history")
+    candidate_response = client.get("/monitoring/candidate-recall/summary")
+    candidate_history_response = client.get("/monitoring/candidate-recall/history")
 
     assert response.status_code == 200
     assert history_response.status_code == 200
+    assert candidate_response.status_code == 200
+    assert candidate_history_response.status_code == 200
     payload = response.json()
     assert payload["available"] is True
     assert payload["bundle_version"] == bundle.manifest.version
     assert payload["summary"]["window_end"] == summary.window_end
     assert history_response.json()["total"] >= 1
+    assert candidate_response.json()["available"] is True
+    assert candidate_response.json()["bundle_version"] == bundle.manifest.version
+    assert candidate_history_response.json()["total"] >= 1
 
     dashboard_response = client.get("/")
     assert dashboard_response.status_code == 200
     assert "Control room for drift review and window-level comparison" in dashboard_response.text
+    assert "Candidate Recovery" in dashboard_response.text
     assert "sparkline-chart" in dashboard_response.text
     assert "data-monitoring-window-select" in dashboard_response.text
 

@@ -1650,19 +1650,63 @@ def _build_item_lookup(prepared: PreparedArtifacts) -> dict[int, Record]:
     return lookup
 
 
-def _mean_text_profile(history_item_idxs: list[int], item_text_matrix: np.ndarray) -> np.ndarray:
-    if not history_item_idxs:
+def _normalize_history_item_idxs(history_item_idxs: object) -> list[int]:
+    if history_item_idxs is None:
+        return []
+    if isinstance(history_item_idxs, np.ndarray):
+        raw_values = history_item_idxs.reshape(-1).tolist()
+    elif isinstance(history_item_idxs, (list, tuple)):
+        raw_values = list(history_item_idxs)
+    elif isinstance(history_item_idxs, set):
+        raw_values = list(history_item_idxs)
+    else:
+        try:
+            if pd.isna(history_item_idxs):
+                return []
+        except (TypeError, ValueError):
+            pass
+        raw_values = [history_item_idxs]
+    normalized: list[int] = []
+
+    def _append_value(value: object) -> None:
+        if isinstance(value, np.ndarray):
+            for item in value.reshape(-1).tolist():
+                _append_value(item)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                _append_value(item)
+            return
+        try:
+            if pd.isna(value):
+                return
+        except (TypeError, ValueError):
+            pass
+        try:
+            normalized.append(int(value))
+        except (TypeError, ValueError):
+            return
+
+    for value in raw_values:
+        _append_value(value)
+    return normalized
+
+
+def _mean_text_profile(history_item_idxs: object, item_text_matrix: np.ndarray) -> np.ndarray:
+    history = _normalize_history_item_idxs(history_item_idxs)
+    if not history:
         return np.zeros((item_text_matrix.shape[1],), dtype=np.float32)
-    valid_indices = [idx - 1 for idx in history_item_idxs if idx > 0]
+    valid_indices = [idx - 1 for idx in history if idx > 0]
     if not valid_indices:
         return np.zeros((item_text_matrix.shape[1],), dtype=np.float32)
     return item_text_matrix[valid_indices].mean(axis=0).astype(np.float32)
 
 
-def _pad_history(history_item_idxs: list[int], history_len: int) -> np.ndarray:
+def _pad_history(history_item_idxs: object, history_len: int) -> np.ndarray:
+    history = _normalize_history_item_idxs(history_item_idxs)
     padded = np.zeros((history_len,), dtype=np.int32)
-    if history_item_idxs:
-        truncated = history_item_idxs[-history_len:]
+    if history:
+        truncated = history[-history_len:]
         padded[-len(truncated):] = np.asarray(truncated, dtype=np.int32)
     return padded
 
@@ -2199,7 +2243,7 @@ def popularity_by_category_candidates(
     rows: list[Record] = []
     global_counter = split_artifacts.train_item_popularity
     for _, example in examples.iterrows():
-        seen_items = set(example["history_item_idxs"])
+        seen_items = set(_normalize_history_item_idxs(example["history_item_idxs"]))
         if not split_artifacts.config.category_backfill_enabled:
             selected_items = _top_items_from_counter(global_counter, seen_items, top_k)
         else:
@@ -2276,9 +2320,9 @@ def item_item_cooccurrence_candidates(
 ) -> pd.DataFrame:
     rows: list[Record] = []
     for _, example in examples.iterrows():
-        seen_items = set(example["history_item_idxs"])
+        seen_items = set(_normalize_history_item_idxs(example["history_item_idxs"]))
         score_counter: Counter = Counter()
-        history_items = list(example["history_item_idxs"])
+        history_items = _normalize_history_item_idxs(example["history_item_idxs"])
         history_count = max(len(history_items), 1)
         for position, history_item in enumerate(history_items):
             neighbors = split_artifacts.cooccurrence.get(int(history_item), Counter())
@@ -2336,12 +2380,13 @@ def _ann_candidates_from_vectors(
     for row_index, (_, example) in enumerate(examples.iterrows()):
         query_vector = np.asarray(query_vectors[row_index], dtype=np.float32)
         split_name = str(example["split"])
+        example_history = _normalize_history_item_idxs(example["history_item_idxs"])
         if split_name == "train":
-            seen_items = set(example["history_item_idxs"])
+            seen_items = set(example_history)
         elif split_name in seen_maps:
-            seen_items = seen_maps[split_name].get(str(example["user_id"]), set(example["history_item_idxs"]))
+            seen_items = seen_maps[split_name].get(str(example["user_id"]), set(example_history))
         else:
-            seen_items = set(example["history_item_idxs"])
+            seen_items = set(example_history)
         requested = max(top_k * 3, 300)
         candidate_rows: list[tuple[int, float]] = []
         while len(candidate_rows) < top_k and requested <= len(item_embeddings) * 2:
@@ -2369,12 +2414,12 @@ def _ann_candidates_from_vectors(
                     "split": split_name,
                     "user_id": str(example["user_id"]),
                     "user_idx": int(example["user_idx"]),
-                    "history_item_idxs": example["history_item_idxs"],
+                    "history_item_idxs": example_history,
                     "target_item_idx": target_item_idx,
                     "target_parent_asin": example["target_parent_asin"],
                     "target_timestamp": example["target_timestamp"],
                     "target_source_category": example.get("target_source_category", ""),
-                    "history_length": int(example.get("history_length", len(example["history_item_idxs"]))),
+                    "history_length": int(example.get("history_length", len(example_history))),
                     "item_idx": int(item_idx),
                     "retrieval_score": float(score),
                     "rank": rank,
@@ -2511,7 +2556,7 @@ def _vector_retriever_queries(
             if 0 < user_idx <= len(user_vectors):
                 vector = user_vectors[user_idx - 1]
             else:
-                history = list(getattr(row, "history_item_idxs"))
+                history = _normalize_history_item_idxs(getattr(row, "history_item_idxs"))
                 if history:
                     vector = np.mean(retriever.item_embeddings[np.asarray(history, dtype=np.int32) - 1], axis=0)
                 else:
@@ -2521,7 +2566,7 @@ def _vector_retriever_queries(
     if retriever.variant in {"two_tower", "dat_lite"}:
         query_vectors = []
         for row in examples.itertuples(index=False):
-            history = list(getattr(row, "history_item_idxs"))
+            history = _normalize_history_item_idxs(getattr(row, "history_item_idxs"))
             if history:
                 vector = np.mean(retriever.item_embeddings[np.asarray(history, dtype=np.int32) - 1], axis=0)
             else:
@@ -2571,12 +2616,13 @@ def generate_candidates(
     for row_index, (_, example) in enumerate(examples.iterrows()):
         user_embedding = user_embeddings[row_index]
         split_name = str(example["split"])
+        example_history = _normalize_history_item_idxs(example["history_item_idxs"])
         if split_name == "train":
-            seen_items = set(example["history_item_idxs"])
+            seen_items = set(example_history)
         elif split_name in seen_maps:
-            seen_items = seen_maps[split_name].get(str(example["user_id"]), set(example["history_item_idxs"]))
+            seen_items = seen_maps[split_name].get(str(example["user_id"]), set(example_history))
         else:
-            seen_items = set(example["history_item_idxs"])
+            seen_items = set(example_history)
         requested = max(top_k * 3, 300)
         candidate_rows: list[tuple[int, float]] = []
         while len(candidate_rows) < top_k and requested <= len(prepared.item_features) * 2:
@@ -2604,12 +2650,12 @@ def generate_candidates(
                     "split": split_name,
                     "user_id": str(example["user_id"]),
                     "user_idx": int(example["user_idx"]),
-                    "history_item_idxs": example["history_item_idxs"],
+                    "history_item_idxs": example_history,
                     "target_item_idx": target_item_idx,
                     "target_parent_asin": example["target_parent_asin"],
                     "target_timestamp": example["target_timestamp"],
                     "target_source_category": example.get("target_source_category", ""),
-                    "history_length": int(example.get("history_length", len(example["history_item_idxs"]))),
+                    "history_length": int(example.get("history_length", len(example_history))),
                     "item_idx": int(item_idx),
                     "retrieval_score": float(score),
                     "rank": rank,
@@ -3041,13 +3087,13 @@ def _candidate_metadata_from_example(example: pd.Series) -> Record:
         "split": str(example["split"]),
         "user_id": str(example["user_id"]),
         "user_idx": int(example["user_idx"]),
-        "history_item_idxs": list(example["history_item_idxs"]),
+        "history_item_idxs": _normalize_history_item_idxs(example["history_item_idxs"]),
         "target_item_idx": int(example["target_item_idx"]),
         "target_parent_asin": example["target_parent_asin"],
         "target_timestamp": example["target_timestamp"],
         "target_source_category": example["target_source_category"],
         "user_interaction_count": float(example["user_interaction_count"]),
-        "history_length": int(example["history_length"]) if "history_length" in example.index else len(example["history_item_idxs"]),
+        "history_length": int(example["history_length"]) if "history_length" in example.index else len(_normalize_history_item_idxs(example["history_item_idxs"])),
         "user_mean_rating": float(example["user_mean_rating"]),
         "user_verified_rate": float(example["user_verified_rate"]),
         "days_since_last": float(example["days_since_last"]),
@@ -3265,11 +3311,15 @@ def candidate_recall_diagnostics(
     split: str,
     variant: str,
     stage: str,
+    bundle_version: str | None = None,
+    scenario: str = "known_user_full_history",
 ) -> pd.DataFrame:
     columns = [
+        "bundle_version",
         "split",
         "variant",
         "stage",
+        "scenario",
         "scope",
         "name",
         "examples",
@@ -3289,6 +3339,8 @@ def candidate_recall_diagnostics(
             "split": split,
             "variant": variant,
             "stage": stage,
+            "bundle_version": bundle_version or "",
+            "scenario": scenario,
             "scope": "overall",
             "name": "all",
             "examples": int(len(example_hits)),
@@ -3310,6 +3362,8 @@ def candidate_recall_diagnostics(
                     "split": split,
                     "variant": variant,
                     "stage": stage,
+                    "bundle_version": bundle_version or "",
+                    "scenario": scenario,
                     "scope": "target_category",
                     "name": str(category),
                     "examples": int(len(group)),
@@ -3331,6 +3385,8 @@ def candidate_recall_diagnostics(
                     "split": split,
                     "variant": variant,
                     "stage": stage,
+                    "bundle_version": bundle_version or "",
+                    "scenario": scenario,
                     "scope": "history_length_bucket",
                     "name": str(bucket),
                     "examples": int(len(group)),
@@ -3350,6 +3406,8 @@ def candidate_recall_diagnostics(
                     "split": split,
                     "variant": variant,
                     "stage": stage,
+                    "bundle_version": bundle_version or "",
+                    "scenario": scenario,
                     "scope": "target_price_bucket",
                     "name": str(bucket),
                     "examples": int(len(group)),
@@ -3360,6 +3418,27 @@ def candidate_recall_diagnostics(
                 }
             )
     source_names = ["cooccurrence", "latent_cf", "content_based", "two_tower", "popularity"]
+    if "cold_start_user_type" in candidates.columns:
+        cold_start_hits = candidates.groupby(["cold_start_user_type", "example_id"], as_index=False)["label"].max()
+        positive_with_type = positive_rows[positive_rows["cold_start_user_type"].notna()] if "cold_start_user_type" in positive_rows.columns else pd.DataFrame()
+        for cold_start_type, group in cold_start_hits.groupby("cold_start_user_type", sort=True):
+            positives = positive_with_type[positive_with_type["cold_start_user_type"] == cold_start_type]
+            rows.append(
+                {
+                    "split": split,
+                    "variant": variant,
+                    "stage": stage,
+                    "bundle_version": bundle_version or "",
+                    "scenario": scenario,
+                    "scope": "cold_start_user_type",
+                    "name": str(cold_start_type),
+                    "examples": int(len(group)),
+                    "hit_rate": float(group["label"].mean()) if not group.empty else 0.0,
+                    "positive_recoveries": int(len(positives)),
+                    "examples_with_positive": int(positives["example_id"].nunique()) if not positives.empty else 0,
+                    "median_positive_rank": float(positives["rank"].median()) if not positives.empty and "rank" in positives.columns else np.nan,
+                }
+            )
     if any(f"from_{source_name}" in candidates.columns for source_name in source_names):
         for source_name in source_names:
             flag_col = f"from_{source_name}"
@@ -3372,6 +3451,8 @@ def candidate_recall_diagnostics(
                     "split": split,
                     "variant": variant,
                     "stage": stage,
+                    "bundle_version": bundle_version or "",
+                    "scenario": scenario,
                     "scope": "candidate_source",
                     "name": source_name,
                     "examples": int(source_candidates["example_id"].nunique()) if not source_candidates.empty else 0,
@@ -3389,6 +3470,8 @@ def candidate_recall_diagnostics(
                     "split": split,
                     "variant": variant,
                     "stage": stage,
+                    "bundle_version": bundle_version or "",
+                    "scenario": scenario,
                     "scope": "candidate_source",
                     "name": str(source_name),
                     "examples": int(source_candidates["example_id"].nunique()) if not source_candidates.empty else 0,
@@ -3482,6 +3565,214 @@ def _add_candidate_item_context(prepared: PreparedArtifacts, candidates: pd.Data
     else:
         enriched["target_source_category"] = enriched["target_source_category"].fillna(enriched["resolved_target_source_category"])
     return enriched
+
+
+CANDIDATE_RECOVERY_SCENARIOS: tuple[str, ...] = (
+    "known_user_full_history",
+    "known_user_sparse_history",
+    "anonymous_catalog_history",
+    "anonymous_no_history",
+)
+
+
+def _diagnostic_target_timestamp_ms(value: object, fallback: int) -> int:
+    try:
+        timestamp = pd.to_datetime(value, utc=True, errors="coerce")
+        if pd.notna(timestamp):
+            return int(timestamp.timestamp() * 1000)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return int(fallback)
+
+
+def _candidate_diagnostic_examples(
+    prepared: PreparedArtifacts,
+    examples: pd.DataFrame,
+    scenario: str,
+) -> pd.DataFrame:
+    if scenario not in CANDIDATE_RECOVERY_SCENARIOS:
+        raise ValueError(f"Unsupported candidate recovery scenario: {scenario!r}")
+    if examples.empty:
+        return examples.copy()
+
+    item_to_category = dict(zip(prepared.item_features["item_idx"], prepared.item_features["source_category"]))
+    rows: list[Record] = []
+    for row in examples.to_dict(orient="records"):
+        original_history = _normalize_history_item_idxs(row.get("history_item_idxs"))
+        if scenario == "known_user_full_history":
+            history = original_history
+            user_id = str(row.get("user_id", ""))
+            user_idx = int(row.get("user_idx", 0) or 0)
+        elif scenario == "known_user_sparse_history":
+            history = original_history[-1:] if original_history else []
+            user_id = str(row.get("user_id", ""))
+            user_idx = int(row.get("user_idx", 0) or 0)
+        elif scenario == "anonymous_catalog_history":
+            history = original_history
+            user_id = "__anonymous_catalog_history__"
+            user_idx = 0
+        else:
+            history = []
+            user_id = "__anonymous_no_history__"
+            user_idx = 0
+
+        prefix_rows = pd.DataFrame(
+            {
+                "item_idx": history,
+                "rating": [5.0] * len(history),
+                "verified_purchase": [1] * len(history),
+                "timestamp": np.arange(len(history), dtype=np.int64) * 1000,
+            },
+            columns=["item_idx", "rating", "verified_purchase", "timestamp"],
+        )
+        target_timestamp_ms = _diagnostic_target_timestamp_ms(row.get("target_timestamp"), (len(history) + 1) * 1000)
+        prefix_features = _compute_prefix_features(
+            prefix_rows,
+            target_timestamp_ms,
+            item_to_category,
+            prepared.config.categories,
+        )
+        updated = {
+            **row,
+            "user_id": user_id,
+            "user_idx": user_idx,
+            "cold_start_user_type": scenario,
+            **prefix_features,
+        }
+        rows.append(updated)
+    return pd.DataFrame(rows)
+
+
+def _candidate_recall_worst_slices(diagnostics: pd.DataFrame, limit: int = 20) -> pd.DataFrame:
+    if diagnostics.empty:
+        return diagnostics.copy()
+    slices = diagnostics[diagnostics["scope"] != "overall"].copy()
+    if slices.empty:
+        return slices
+    slices["hit_rate"] = pd.to_numeric(slices["hit_rate"], errors="coerce").fillna(0.0)
+    slices["examples"] = pd.to_numeric(slices["examples"], errors="coerce").fillna(0).astype(int)
+    return slices.sort_values(["hit_rate", "examples", "scope", "name"], ascending=[True, False, True, True]).head(limit).reset_index(drop=True)
+
+
+def candidate_recall_output_frames(diagnostics: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if diagnostics.empty:
+        return {
+            "candidate_recall_diagnostics": diagnostics.copy(),
+            "candidate_recall_by_category": diagnostics.copy(),
+            "candidate_recall_by_history_bucket": diagnostics.copy(),
+            "candidate_recall_by_source": diagnostics.copy(),
+            "candidate_recall_by_cold_start_type": diagnostics.copy(),
+            "candidate_recall_worst_slices": diagnostics.copy(),
+        }
+    return {
+        "candidate_recall_diagnostics": diagnostics.copy(),
+        "candidate_recall_by_category": diagnostics[diagnostics["scope"] == "target_category"].copy(),
+        "candidate_recall_by_history_bucket": diagnostics[diagnostics["scope"] == "history_length_bucket"].copy(),
+        "candidate_recall_by_source": diagnostics[diagnostics["scope"] == "candidate_source"].copy(),
+        "candidate_recall_by_cold_start_type": diagnostics[diagnostics["scope"] == "cold_start_user_type"].copy(),
+        "candidate_recall_worst_slices": _candidate_recall_worst_slices(diagnostics),
+    }
+
+
+def write_candidate_recall_outputs(eval_dir: Path, diagnostics: pd.DataFrame) -> dict[str, Path]:
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    output_frames = candidate_recall_output_frames(diagnostics)
+    paths: dict[str, Path] = {}
+    for stem, frame in output_frames.items():
+        path = eval_dir / f"{stem}.csv"
+        frame.to_csv(path, index=False)
+        paths[stem] = path
+
+    legacy_aliases = {
+        "candidate_recall_by_category": "candidate_union_recall_by_category.csv",
+        "candidate_recall_by_history_bucket": "candidate_union_recall_by_history_bucket.csv",
+        "candidate_recall_by_source": "candidate_union_recall_by_source.csv",
+    }
+    for stem, filename in legacy_aliases.items():
+        frame = output_frames[stem]
+        if not frame.empty:
+            path = eval_dir / filename
+            frame.to_csv(path, index=False)
+            paths[filename.removesuffix(".csv")] = path
+    return paths
+
+
+def run_candidate_recovery_diagnostics(
+    prepared: PreparedArtifacts,
+    split_artifacts: SplitArtifacts,
+    retrievers: dict[str, RetrieverArtifacts],
+    examples: pd.DataFrame,
+    *,
+    split: str,
+    bundle_version: str | None = None,
+    scenarios: tuple[str, ...] = CANDIDATE_RECOVERY_SCENARIOS,
+) -> dict[str, object]:
+    diagnostics_frames: list[pd.DataFrame] = []
+    total_candidate_rows = 0
+    total_ranker_candidate_rows = 0
+    for scenario in scenarios:
+        scenario_examples = _candidate_diagnostic_examples(prepared, examples, scenario)
+        if scenario_examples.empty:
+            continue
+        candidates = generate_candidate_union(
+            prepared,
+            split_artifacts,
+            retrievers,
+            scenario_examples,
+            top_k=prepared.config.candidate_union_top_k,
+            inject_target_if_missing=False,
+            include_candidate_sources=True,
+        )
+        total_candidate_rows += int(len(candidates))
+        candidates["cold_start_user_type"] = scenario
+        candidates["scenario"] = scenario
+        candidates_with_context = _add_candidate_item_context(prepared, candidates)
+        diagnostics_frames.append(
+            candidate_recall_diagnostics(
+                candidates_with_context,
+                split=split,
+                variant="hybrid_union",
+                stage="candidate_union",
+                bundle_version=bundle_version,
+                scenario=scenario,
+            )
+        )
+        pruned = (
+            candidates.sort_values(["example_id", "retrieval_score"], ascending=[True, False])
+            .groupby("example_id", group_keys=False)
+            .head(prepared.config.ranker_candidate_top_k)
+            .reset_index(drop=True)
+        )
+        total_ranker_candidate_rows += int(len(pruned))
+        pruned_with_context = _add_candidate_item_context(prepared, pruned)
+        diagnostics_frames.append(
+            candidate_recall_diagnostics(
+                pruned_with_context,
+                split=split,
+                variant="hybrid_union",
+                stage="ranker_candidates",
+                bundle_version=bundle_version,
+                scenario=scenario,
+            )
+        )
+
+    diagnostics = pd.concat(diagnostics_frames, ignore_index=True) if diagnostics_frames else candidate_recall_diagnostics(
+        pd.DataFrame(),
+        split=split,
+        variant="hybrid_union",
+        stage="candidate_union",
+        bundle_version=bundle_version,
+    )
+    output_frames = candidate_recall_output_frames(diagnostics)
+    return {
+        "bundle_version": bundle_version or "",
+        "split": split,
+        "examples": int(len(examples)),
+        "candidate_rows": total_candidate_rows,
+        "ranker_candidate_rows": total_ranker_candidate_rows,
+        "diagnostics": diagnostics,
+        "output_frames": output_frames,
+    }
 
 
 def candidate_distribution_by_category_price(
@@ -3603,17 +3894,18 @@ def _build_ranker_payload(
     user_text_profiles = np.stack([_mean_text_profile(history, prepared.item_text_matrix) for history in unique_examples["history_item_idxs"]]).astype(np.float32)
     item_prices_full = prepared.item_features["price"].fillna(0.0).to_numpy(dtype=np.float32)
     item_ratings_full = prepared.item_features["average_rating"].fillna(0.0).to_numpy(dtype=np.float32)
+    normalized_histories = [_normalize_history_item_idxs(history) for history in unique_examples["history_item_idxs"]]
     history_price_means = np.asarray(
         [
             float(np.mean(item_prices_full[np.asarray(history, dtype=np.int32) - 1])) if history else 0.0
-            for history in unique_examples["history_item_idxs"]
+            for history in normalized_histories
         ],
         dtype=np.float32,
     )
     history_rating_means = np.asarray(
         [
             float(np.mean(item_ratings_full[np.asarray(history, dtype=np.int32) - 1])) if history else 0.0
-            for history in unique_examples["history_item_idxs"]
+            for history in normalized_histories
         ],
         dtype=np.float32,
     )
@@ -3685,7 +3977,7 @@ def _build_ranker_payload(
     dense_blocks: list[np.ndarray] = [
         candidates["retrieval_score"].to_numpy(dtype=np.float32).reshape(-1, 1),
         cosine_similarity,
-        np.asarray([len(history) for history in candidates["history_item_idxs"]], dtype=np.float32).reshape(-1, 1),
+        np.asarray([len(_normalize_history_item_idxs(history)) for history in candidates["history_item_idxs"]], dtype=np.float32).reshape(-1, 1),
         candidates["user_interaction_count"].to_numpy(dtype=np.float32).reshape(-1, 1),
         candidates["user_mean_rating"].to_numpy(dtype=np.float32).reshape(-1, 1),
         candidates["user_verified_rate"].to_numpy(dtype=np.float32).reshape(-1, 1),
@@ -3988,6 +4280,7 @@ def evaluate_ranker(
     embedding_retriever = _select_embedding_retriever(retrievers)
     rows: list[pd.DataFrame] = []
     union_diagnostic_frames: list[pd.DataFrame] = []
+    candidate_recovery_frames: list[pd.DataFrame] = []
     served_distribution_frames: list[pd.DataFrame] = []
     for split_name, examples in [("val", split_artifacts.val_examples), ("test", split_artifacts.test_examples)]:
         eval_examples = examples
@@ -4010,6 +4303,7 @@ def evaluate_ranker(
                 split=split_name,
                 variant=variant,
                 stage="candidate_union",
+                scenario="known_user_full_history",
             )
             union_diagnostics.to_csv(prepared.config.eval_dir / f"{variant}_{split_name}_candidate_union_diagnostics_metrics.csv", index=False)
             union_diagnostic_frames.append(union_diagnostics)
@@ -4062,6 +4356,15 @@ def evaluate_ranker(
         metrics["variant"] = variant
         metrics["stage"] = "ranker"
         rows.append(metrics)
+        if isinstance(retrievers, dict):
+            recovery_payload = run_candidate_recovery_diagnostics(
+                prepared,
+                split_artifacts,
+                retrievers,
+                eval_examples,
+                split=split_name,
+            )
+            candidate_recovery_frames.append(recovery_payload["diagnostics"])
         ranked_with_context.to_parquet(prepared.config.eval_dir / f"{metrics.iloc[0]['variant']}_{split_name}_ranked_candidates.parquet", index=False)
         del candidate_frame
         del candidate_frame_with_context
@@ -4085,6 +4388,9 @@ def evaluate_ranker(
         served_distribution = pd.concat(served_distribution_frames, ignore_index=True)
         if not served_distribution.empty:
             served_distribution.to_csv(prepared.config.eval_dir / "served_distribution_by_category_price.csv", index=False)
+    if candidate_recovery_frames:
+        candidate_recovery = pd.concat(candidate_recovery_frames, ignore_index=True)
+        write_candidate_recall_outputs(Path(prepared.config.eval_dir), candidate_recovery)
     if not rows:
         return _normalize_metrics_frame(None, extra_columns=("split", "variant", "stage"))
     return pd.concat(rows, ignore_index=True)

@@ -10,13 +10,15 @@ When MLflow is enabled, the package-first training workflow logs:
 - dataset and split counts
 - evaluation metrics from offline metric CSV files
 - evaluation artifacts
-- exported bundle files and bundle lineage metadata
+- exported bundle manifest, evaluation summary, monitoring reference profile, candidate diagnostics, and bundle lineage metadata
 
 One MLflow run can therefore tell you:
 
 - which settings produced a bundle
 - which evaluation metrics were recorded
 - which bundle version was exported from that run
+
+By default, local MLflow does not copy the full runtime bundle directory. Full bundle logging can duplicate many GB of artifacts because the authoritative bundle is already stored under `artifacts/amazon_recsys/bundles`.
 
 ## Relevant Environment Variables
 
@@ -25,6 +27,7 @@ One MLflow run can therefore tell you:
 - `AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME`
 - `AMAZON_RECSYS_MLFLOW_BACKEND_ROOT`
 - `AMAZON_RECSYS_MLFLOW_RUN_NAME_PREFIX`
+- `AMAZON_RECSYS_MLFLOW_LOG_FULL_BUNDLE`
 
 ## How To Customize The Experiment Name
 
@@ -122,6 +125,7 @@ AMAZON_RECSYS_MLFLOW_ENABLED=true
 AMAZON_RECSYS_MLFLOW_TRACKING_URI=
 AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME=amazon-recsys-local
 AMAZON_RECSYS_MLFLOW_BACKEND_ROOT=mlflow_runs
+AMAZON_RECSYS_MLFLOW_LOG_FULL_BUNDLE=false
 ```
 
 4. Start the MLflow UI:
@@ -166,6 +170,7 @@ $env:AMAZON_RECSYS_MLFLOW_ENABLED="true"
 $env:AMAZON_RECSYS_MLFLOW_TRACKING_URI="http://your-mlflow-server:5000"
 $env:AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME="amazon-recsys-prod"
 $env:AMAZON_RECSYS_MLFLOW_RUN_NAME_PREFIX="prod"
+$env:AMAZON_RECSYS_MLFLOW_LOG_FULL_BUNDLE="false"
 python -m amazon_recsys.cli.main export-bundle --run-name prod-local --run-profile quality --activate
 python -m amazon_recsys.cli.main serve
 ```
@@ -180,8 +185,11 @@ Recommended `.env` values:
 - `AMAZON_RECSYS_MLFLOW_TRACKING_URI=`
 - `AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME=amazon-recsys-local`
 - `AMAZON_RECSYS_MLFLOW_BACKEND_ROOT=mlflow_runs`
+- `AMAZON_RECSYS_MLFLOW_LOG_FULL_BUNDLE=false`
 
 If `AMAZON_RECSYS_MLFLOW_TRACKING_URI` is blank, the app uses the local file-backed store under `mlflow_runs`.
+
+Keep `AMAZON_RECSYS_MLFLOW_LOG_FULL_BUNDLE=false` for local file-backed MLflow. Setting it to `true` copies the full exported bundle into MLflow and can require many additional GB per production export.
 
 ## Production MLflow Mode
 
@@ -193,6 +201,7 @@ Recommended values:
 - `AMAZON_RECSYS_MLFLOW_TRACKING_URI=http://your-mlflow-server:5000`
 - `AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME=amazon-recsys-prod`
 - `AMAZON_RECSYS_MLFLOW_RUN_NAME_PREFIX=prod`
+- `AMAZON_RECSYS_MLFLOW_LOG_FULL_BUNDLE=false`
 
 In production mode:
 
@@ -216,7 +225,7 @@ Inside a run, check:
 - `Artifacts`
   - `training/`
   - `evaluation/`
-  - `bundle/`, including `runtime_bundle.json` and `models/ranker.onnx`
+  - `bundle/`, including the manifest, evaluation summary, reference profile, and candidate diagnostics
 - `Tags`
   - phase, backend, retriever variants, bundle version
 

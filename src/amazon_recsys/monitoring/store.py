@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -18,18 +19,20 @@ class LocalMonitoringStore:
         self.inference_log_path = self.root / "inference_logs.parquet"
         self.outcome_log_path = self.root / "outcomes.parquet"
         self.summaries_dir = self.root / "summaries"
+        self.candidate_diagnostics_dir = self.root / "candidate_diagnostics"
         self.latest_dir = self.root / "latest"
         self.ensure_directories()
 
     def ensure_directories(self) -> None:
         self.reference_dir.mkdir(parents=True, exist_ok=True)
         self.summaries_dir.mkdir(parents=True, exist_ok=True)
+        self.candidate_diagnostics_dir.mkdir(parents=True, exist_ok=True)
         self.latest_dir.mkdir(parents=True, exist_ok=True)
 
     def _write_json(self, path: Path, payload: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+            json.dump(self._json_safe(payload), handle, indent=2)
 
     def _read_json(self, path: Path) -> dict[str, object]:
         with open(path, "r", encoding="utf-8") as handle:
@@ -39,6 +42,29 @@ class LocalMonitoringStore:
         if not path.exists():
             return pd.DataFrame()
         return pd.read_parquet(path)
+
+    def _json_safe(self, value: object) -> object:
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): self._json_safe(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._json_safe(item) for item in value]
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except (TypeError, ValueError):
+                return str(value)
+        return value
 
     def _append_frame(self, path: Path, frame: pd.DataFrame, dedupe_columns: list[str] | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,4 +232,43 @@ class LocalMonitoringStore:
             if path.name.endswith("-reference_profile.json"):
                 continue
             summaries.append(MonitoringSummary.from_dict(self._read_json(path)))
+        return summaries
+
+    def save_candidate_diagnostics(
+        self,
+        summary: dict[str, object],
+        diagnostic_frame: pd.DataFrame,
+        worst_slice_frame: pd.DataFrame,
+    ) -> dict[str, Path]:
+        bundle_version = str(summary["bundle_version"])
+        bundle_dir = self.candidate_diagnostics_dir / sanitize_filename(bundle_version)
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        summary_name = sanitize_filename(str(summary.get("created_at", "candidate-diagnostics")))
+        summary_path = bundle_dir / f"{summary_name}.json"
+        diagnostics_path = bundle_dir / f"{summary_name}-candidate_recall.csv"
+        worst_slices_path = bundle_dir / f"{summary_name}-worst_slices.csv"
+
+        diagnostic_frame.to_csv(diagnostics_path, index=False)
+        worst_slice_frame.to_csv(worst_slices_path, index=False)
+        self._write_json(summary_path, summary)
+        self._write_json(self.latest_dir / f"{sanitize_filename(bundle_version)}-candidate_recall.json", summary)
+        return {
+            "summary_path": summary_path,
+            "diagnostics_path": diagnostics_path,
+            "worst_slices_path": worst_slices_path,
+        }
+
+    def load_latest_candidate_diagnostics(self, bundle_version: str) -> dict[str, object] | None:
+        path = self.latest_dir / f"{sanitize_filename(bundle_version)}-candidate_recall.json"
+        if not path.exists():
+            return None
+        return self._read_json(path)
+
+    def list_candidate_diagnostics(self, bundle_version: str) -> list[dict[str, object]]:
+        bundle_dir = self.candidate_diagnostics_dir / sanitize_filename(bundle_version)
+        if not bundle_dir.exists():
+            return []
+        summaries: list[dict[str, object]] = []
+        for path in sorted(bundle_dir.glob("*.json")):
+            summaries.append(self._read_json(path))
         return summaries

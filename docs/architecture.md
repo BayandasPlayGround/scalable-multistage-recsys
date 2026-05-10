@@ -62,6 +62,8 @@ Main runtime surfaces:
 - `/evaluate/summary`
 - `/monitoring/drift/summary`
 - `/monitoring/drift/history`
+- `/monitoring/candidate-recall/summary`
+- `/monitoring/candidate-recall/history`
 
 If no active bundle exists, the service can return a mock bundle only when `use_mock_bundle_if_missing` is enabled. The real serving path is always the active exported bundle.
 
@@ -80,8 +82,10 @@ Operational entry points:
 - `simulate-outcomes`
 - `monitor-drift`
 - `monitor-backfill`
+- `diagnose-candidates --persist`
 
 The monitoring package persists latest summaries plus history, computes feature drift and concept drift, and logs monitoring runs to MLflow when enabled.
+Candidate recall diagnostics are persisted alongside monitoring history so an active bundle can be inspected for target recovery by category, history length, candidate source, and cold-start user type without retraining.
 
 ## Compatibility
 

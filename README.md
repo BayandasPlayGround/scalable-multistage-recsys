@@ -81,10 +81,10 @@ The most important data-volume controls are:
 - `AMAZON_RECSYS_RANKER_TRAIN_EXAMPLE_CAP`, `AMAZON_RECSYS_RANKER_VAL_EXAMPLE_CAP`, and `AMAZON_RECSYS_EVAL_USER_CAP`: cap ranker and evaluation workload without changing the raw data scan.
 - `AMAZON_RECSYS_ENABLE_NEURAL_RETRIEVER`: controls whether the TensorFlow two-tower retriever is trained. Keep this off for fast local and CPU runs; enable it for production-quality experiments when compute allows.
 
-After a run, inspect candidate recovery without retraining:
+After a run, inspect candidate recovery without retraining. Add `--persist` when you want the active bundle's candidate recall summary saved into monitoring history and shown in the dashboard:
 
 ```powershell
-python -m amazon_recsys.cli.main diagnose-candidates --bundle-version active --split test --sample-size 500
+python -m amazon_recsys.cli.main diagnose-candidates --bundle-version active --split test --sample-size 500 --persist
 ```
 
 For a quick small run:
@@ -103,6 +103,7 @@ $env:AMAZON_RECSYS_ENVIRONMENT="production"
 $env:AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING="false"
 $env:AMAZON_RECSYS_MLFLOW_ENABLED="true"
 $env:AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME="amazon-recsys-prod"
+$env:AMAZON_RECSYS_MLFLOW_LOG_FULL_BUNDLE="false"
 $env:AMAZON_RECSYS_CATEGORIES='["All_Beauty","Automotive","Industrial_and_Scientific"]'
 python -m amazon_recsys.cli.main export-bundle --run-name prod-2026-04-28 --run-profile quality --version prod-2026-04-28
 ```

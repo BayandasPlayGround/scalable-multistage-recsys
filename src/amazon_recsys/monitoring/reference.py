@@ -61,6 +61,11 @@ def _popularity_thresholds(item_features: pd.DataFrame) -> list[float]:
     return [float(value) for value in quantiles]
 
 
+def _history_items_from_example(prepared: core.PreparedArtifacts, raw_history: object) -> list[str]:
+    history_item_idxs = core._normalize_history_item_idxs(raw_history)
+    return [prepared.item_idx_to_id[item_idx] for item_idx in history_item_idxs if item_idx in prepared.item_idx_to_id]
+
+
 def _recommendation_sample_frame(session: TrainingSession, monitored_k: int, user_cap: int = 200) -> pd.DataFrame:
     prepared = session.prepared
     split_artifacts = session.split_artifacts
@@ -71,23 +76,35 @@ def _recommendation_sample_frame(session: TrainingSession, monitored_k: int, use
     test_examples = split_artifacts.test_examples.copy()
     if test_examples.empty:
         return pd.DataFrame()
-    users = (
-        test_examples[["user_id", "history_length"]]
-        .drop_duplicates("user_id")
-        .sort_values("history_length", ascending=False)
-        .head(user_cap)
-    )
+    columns = ["user_id", "history_length"]
+    if "history_item_idxs" in test_examples.columns:
+        columns.append("history_item_idxs")
+    users = test_examples[columns].copy()
+    if "history_item_idxs" not in users.columns:
+        users["history_item_idxs"] = [[] for _ in range(len(users))]
+    users["history_length"] = pd.to_numeric(users["history_length"], errors="coerce").fillna(0).astype(int)
+    users = users.sort_values("history_length", ascending=False).drop_duplicates("user_id").head(user_cap)
 
     rows: list[dict[str, object]] = []
+    skipped_users = 0
     for user_row in users.to_dict(orient="records"):
-        frame = core.recommend(
-            prepared,
-            split_artifacts,
-            session.retrievers,
-            ranker=session.ranker,
-            user_id=str(user_row["user_id"]),
-            top_k=monitored_k,
-        )
+        history_items = _history_items_from_example(prepared, user_row.get("history_item_idxs"))
+        if not history_items:
+            skipped_users += 1
+            continue
+        try:
+            frame = core.recommend(
+                prepared,
+                split_artifacts,
+                session.retrievers,
+                ranker=session.ranker,
+                user_id=str(user_row["user_id"]),
+                history_items=history_items,
+                top_k=monitored_k,
+            )
+        except ValueError:
+            skipped_users += 1
+            continue
         if frame.empty:
             continue
         frame = frame.rename(columns={"parent_asin": "item_id"}).merge(item_frame[["item_id", "popularity_value"]], on="item_id", how="left")
@@ -96,7 +113,10 @@ def _recommendation_sample_frame(session: TrainingSession, monitored_k: int, use
         frame["unseen_user"] = False
         frame["unseen_history_item_rate"] = 0.0
         rows.extend(frame.to_dict(orient="records"))
-    return pd.DataFrame(rows)
+    output = pd.DataFrame(rows)
+    output.attrs["attempted_reference_users"] = int(len(users))
+    output.attrs["skipped_reference_users"] = int(skipped_users)
+    return output
 
 
 def build_reference_profile(
@@ -159,6 +179,8 @@ def build_reference_profile(
         notes={
             "request_sample_size": int(len(request_examples)),
             "served_item_sample_size": int(len(recommendation_frame)),
+            "reference_recommendation_attempted_users": int(recommendation_frame.attrs.get("attempted_reference_users", 0)),
+            "reference_recommendation_skipped_users": int(recommendation_frame.attrs.get("skipped_reference_users", 0)),
             "popularity_thresholds": popularity_thresholds,
             "monitoring_root": str(settings.monitoring.monitoring_root),
         },
