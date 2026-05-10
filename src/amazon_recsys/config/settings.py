@@ -77,6 +77,7 @@ class MLflowConfig(BaseModel):
     experiment_name: str = "amazon-recsys"
     backend_root: Path
     run_name_prefix: str = ""
+    log_full_bundle: bool = False
 
 
 class MonitoringConfig(BaseModel):
@@ -134,6 +135,7 @@ class AppSettings(BaseSettings):
     mlflow_experiment_name: str = "amazon-recsys"
     mlflow_backend_root: Path = Path("mlflow_runs")
     mlflow_run_name_prefix: str = ""
+    mlflow_log_full_bundle: bool = False
     monitoring_enabled: bool = False
     monitoring_root: Path = Path("artifacts/amazon_recsys/monitoring")
     monitoring_window_days: int = 1
@@ -359,6 +361,7 @@ class AppSettings(BaseSettings):
             experiment_name=self.mlflow_experiment_name,
             backend_root=self.resolved_mlflow_backend_root,
             run_name_prefix=self.mlflow_run_name_prefix,
+            log_full_bundle=self.mlflow_log_full_bundle,
         )
 
     @property

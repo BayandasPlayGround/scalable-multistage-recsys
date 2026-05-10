@@ -103,6 +103,7 @@ $env:AMAZON_RECSYS_ENVIRONMENT="production"
 $env:AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING="false"
 $env:AMAZON_RECSYS_MLFLOW_ENABLED="true"
 $env:AMAZON_RECSYS_MLFLOW_EXPERIMENT_NAME="amazon-recsys-prod"
+$env:AMAZON_RECSYS_MLFLOW_LOG_FULL_BUNDLE="false"
 $env:AMAZON_RECSYS_CATEGORIES='["All_Beauty","Automotive","Industrial_and_Scientific"]'
 python -m amazon_recsys.cli.main export-bundle --run-name prod-2026-04-28 --run-profile quality --version prod-2026-04-28
 ```

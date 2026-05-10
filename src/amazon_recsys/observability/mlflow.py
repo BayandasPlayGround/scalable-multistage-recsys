@@ -245,7 +245,17 @@ class MLflowTracker:
                     "bundle.retriever_variants": ",".join(manifest.retriever_variants),
                 }
             )
-            self._log_artifacts_if_exists(Path(manifest.bundle_dir), artifact_path="bundle")
+            if self.config.log_full_bundle:
+                LOGGER.warning(
+                    "Logging the full bundle directory to MLflow. This duplicates large runtime artifacts under the MLflow store."
+                )
+                self._log_artifacts_if_exists(Path(manifest.bundle_dir), artifact_path="bundle")
+            else:
+                LOGGER.info("Skipping full bundle artifact logging to MLflow; logging bundle manifest and summaries only.")
+                self._log_artifact_if_exists(manifest.manifest_file, artifact_path="bundle")
+                evaluation_summary_path = manifest.evaluation_summary_path
+                if evaluation_summary_path is not None:
+                    self._log_artifact_if_exists(Path(evaluation_summary_path), artifact_path="bundle")
             for artifact_path in extra_artifacts or []:
                 self._log_artifact_if_exists(Path(artifact_path), artifact_path="bundle")
 
