@@ -46,6 +46,8 @@ class RetrievalConfig(BaseModel):
     neural_candidate_k: int = 50
     category_backfill_enabled: bool = True
     recency_cooccurrence_enabled: bool = True
+    candidate_source_balance_enabled: bool = True
+    vector_retriever_trigger_count: int = 5
 
 
 class RankingConfig(BaseModel):
@@ -170,6 +172,8 @@ class AppSettings(BaseSettings):
     neural_candidate_k: int = 50
     category_backfill_enabled: bool = True
     recency_cooccurrence_enabled: bool = True
+    candidate_source_balance_enabled: bool = True
+    vector_retriever_trigger_count: int = 5
 
     ranker_backend: str = "xgboost"
     ranker_candidate_top_k: int = 25
@@ -324,6 +328,8 @@ class AppSettings(BaseSettings):
             neural_candidate_k=self.neural_candidate_k,
             category_backfill_enabled=self.category_backfill_enabled,
             recency_cooccurrence_enabled=self.recency_cooccurrence_enabled,
+            candidate_source_balance_enabled=self.candidate_source_balance_enabled,
+            vector_retriever_trigger_count=self.vector_retriever_trigger_count,
         )
 
     @property

@@ -20,7 +20,7 @@ import tensorflow as tf
 from annoy import AnnoyIndex
 from scipy import sparse
 from sklearn.decomposition import TruncatedSVD
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer, TfidfVectorizer
 
 try:
     import xgboost as xgb
@@ -108,6 +108,8 @@ class PipelineConfig:
     popularity_backfill_k: int = 50
     category_backfill_enabled: bool = True
     recency_cooccurrence_enabled: bool = True
+    candidate_source_balance_enabled: bool = True
+    vector_retriever_trigger_count: int = 5
     candidate_union_top_k: int = 300
     ranker_candidate_top_k: int = 200
     ranker_train_example_cap: int = 2_000
@@ -317,6 +319,8 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "enable_neural_retriever": False,
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
+            "candidate_source_balance_enabled": True,
+            "vector_retriever_trigger_count": 5,
             "eval_user_cap": 1_000,
             "candidate_union_top_k": 200,
             "candidate_union_batch_size": 300,
@@ -332,10 +336,16 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "enable_neural_retriever": False,
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
+            "candidate_source_balance_enabled": True,
+            "vector_retriever_trigger_count": 5,
             "eval_user_cap": 2_000,
-            "candidate_union_top_k": 200,
+            "candidate_union_top_k": 500,
             "candidate_union_batch_size": 500,
-            "ranker_candidate_top_k": 100,
+            "cooccurrence_candidate_k": 250,
+            "latent_cf_candidate_k": 250,
+            "content_candidate_k": 250,
+            "popularity_backfill_k": 100,
+            "ranker_candidate_top_k": 200,
             "ranker_train_example_cap": 5_000,
             "ranker_val_example_cap": 1_000,
             "split_eval_example_cap": 2_000,
@@ -347,10 +357,16 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "enable_neural_retriever": True,
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
+            "candidate_source_balance_enabled": True,
+            "vector_retriever_trigger_count": 5,
             "eval_user_cap": 2_000,
-            "candidate_union_top_k": 200,
+            "candidate_union_top_k": 500,
             "candidate_union_batch_size": 500,
-            "ranker_candidate_top_k": 100,
+            "cooccurrence_candidate_k": 250,
+            "latent_cf_candidate_k": 250,
+            "content_candidate_k": 250,
+            "popularity_backfill_k": 100,
+            "ranker_candidate_top_k": 200,
             "ranker_train_example_cap": 5_000,
             "ranker_val_example_cap": 1_000,
             "split_eval_example_cap": 2_000,
@@ -362,9 +378,15 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "enable_neural_retriever": True,
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
+            "candidate_source_balance_enabled": True,
+            "vector_retriever_trigger_count": 5,
             "eval_user_cap": None,
-            "candidate_union_top_k": 300,
+            "candidate_union_top_k": 500,
             "candidate_union_batch_size": 1_000,
+            "cooccurrence_candidate_k": 250,
+            "latent_cf_candidate_k": 250,
+            "content_candidate_k": 250,
+            "popularity_backfill_k": 100,
             "ranker_candidate_top_k": 200,
             "ranker_train_example_cap": 50_000,
             "ranker_val_example_cap": 5_000,
@@ -2361,10 +2383,67 @@ def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
     return matrix / norms
 
 
-def _ann_candidates_from_vectors(
+def _recent_unique_history_items(history_item_idxs: object, limit: int) -> list[int]:
+    if limit <= 0:
+        return []
+    history = _normalize_history_item_idxs(history_item_idxs)
+    selected: list[int] = []
+    seen: set[int] = set()
+    for item_idx in reversed(history):
+        if item_idx in seen:
+            continue
+        seen.add(item_idx)
+        selected.append(int(item_idx))
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _mean_embedding_profile(history_item_idxs: object, item_embeddings: np.ndarray) -> np.ndarray:
+    history = [item_idx for item_idx in _normalize_history_item_idxs(history_item_idxs) if 0 < item_idx <= len(item_embeddings)]
+    if not history:
+        return np.zeros((item_embeddings.shape[1],), dtype=np.float32)
+    return np.mean(item_embeddings[np.asarray(history, dtype=np.int32) - 1], axis=0).astype(np.float32)
+
+
+def _weighted_vector_query_specs(
+    prepared: PreparedArtifacts,
+    retriever: RetrieverArtifacts,
+    example: pd.Series,
+) -> list[tuple[np.ndarray, float]]:
+    specs: list[tuple[np.ndarray, float]] = []
+    trigger_limit = max(int(prepared.config.vector_retriever_trigger_count), 0)
+    history = _normalize_history_item_idxs(example["history_item_idxs"])
+    if retriever.variant == "latent_cf":
+        user_vectors = np.asarray(retriever.metadata.get("user_vectors"), dtype=np.float32)
+        user_idx = int(example.get("user_idx", 0))
+        if 0 < user_idx <= len(user_vectors):
+            specs.append((user_vectors[user_idx - 1].astype(np.float32, copy=False), 1.0))
+    trigger_weights = (1.0, 0.9, 0.8, 0.7, 0.6)
+    for trigger_position, item_idx in enumerate(_recent_unique_history_items(history, trigger_limit)):
+        if not 0 < item_idx <= len(retriever.item_embeddings):
+            continue
+        weight = trigger_weights[trigger_position] if trigger_position < len(trigger_weights) else max(0.5, 1.0 - 0.1 * trigger_position)
+        specs.append((retriever.item_embeddings[item_idx - 1].astype(np.float32, copy=False), float(weight)))
+    if history:
+        if retriever.variant == "content_based":
+            mean_vector = _mean_text_profile(history, prepared.item_text_matrix)
+        else:
+            mean_vector = _mean_embedding_profile(history, retriever.item_embeddings)
+        specs.append((mean_vector.astype(np.float32, copy=False), 0.75))
+    normalized_specs: list[tuple[np.ndarray, float]] = []
+    for vector, weight in specs:
+        vector = _normalize_rows(vector)[0].astype(np.float32, copy=False)
+        if not np.any(vector):
+            continue
+        normalized_specs.append((vector, float(weight)))
+    return normalized_specs
+
+
+def _ann_candidates_from_query_specs(
     item_embeddings: np.ndarray,
     ann_index: AnnoyIndex,
-    query_vectors: np.ndarray,
+    query_specs_by_example: list[list[tuple[np.ndarray, float]]],
     examples: pd.DataFrame,
     split_artifacts: SplitArtifacts,
     top_k: int,
@@ -2378,7 +2457,7 @@ def _ann_candidates_from_vectors(
         "test": split_artifacts.test_seen_map,
     }
     for row_index, (_, example) in enumerate(examples.iterrows()):
-        query_vector = np.asarray(query_vectors[row_index], dtype=np.float32)
+        query_specs = query_specs_by_example[row_index] if row_index < len(query_specs_by_example) else []
         split_name = str(example["split"])
         example_history = _normalize_history_item_idxs(example["history_item_idxs"])
         if split_name == "train":
@@ -2387,26 +2466,26 @@ def _ann_candidates_from_vectors(
             seen_items = seen_maps[split_name].get(str(example["user_id"]), set(example_history))
         else:
             seen_items = set(example_history)
-        requested = max(top_k * 3, 300)
-        candidate_rows: list[tuple[int, float]] = []
-        while len(candidate_rows) < top_k and requested <= len(item_embeddings) * 2:
-            indices, distances = ann_index.get_nns_by_vector(query_vector.tolist(), requested, include_distances=True)
-            candidate_rows.clear()
-            for annoy_row, distance in zip(indices, distances):
-                item_idx = int(annoy_row + 1)
-                if item_idx in seen_items:
-                    continue
-                cosine_like_score = 1.0 - (distance ** 2) / 2.0
-                candidate_rows.append((item_idx, cosine_like_score))
-                if len(candidate_rows) >= top_k:
-                    break
+        candidate_scores: dict[int, float] = {}
+        request_cap = len(item_embeddings)
+        requested = min(max(top_k, 100), request_cap)
+        while query_specs and len(candidate_scores) < top_k and requested <= request_cap:
+            for query_vector, query_weight in query_specs:
+                indices, distances = ann_index.get_nns_by_vector(query_vector.tolist(), requested, include_distances=True)
+                for annoy_row, distance in zip(indices, distances):
+                    item_idx = int(annoy_row + 1)
+                    if item_idx in seen_items:
+                        continue
+                    cosine_like_score = 1.0 - (distance ** 2) / 2.0
+                    weighted_score = float(cosine_like_score) * float(query_weight)
+                    if weighted_score > candidate_scores.get(item_idx, -np.inf):
+                        candidate_scores[item_idx] = weighted_score
             requested *= 2
         target_item_idx = int(example["target_item_idx"])
-        retrieved_items = {item_idx for item_idx, _ in candidate_rows}
-        if inject_target_if_missing and split_name != "inference" and target_item_idx not in retrieved_items:
-            target_score = float(np.dot(query_vector, item_embeddings[target_item_idx - 1]))
-            candidate_rows.append((target_item_idx, target_score))
-        candidate_rows = sorted(candidate_rows, key=lambda value: value[1], reverse=True)[:top_k]
+        if inject_target_if_missing and split_name != "inference" and target_item_idx not in candidate_scores and query_specs:
+            target_vector = item_embeddings[target_item_idx - 1]
+            candidate_scores[target_item_idx] = max(float(np.dot(query_vector, target_vector)) * query_weight for query_vector, query_weight in query_specs)
+        candidate_rows = sorted(candidate_scores.items(), key=lambda value: value[1], reverse=True)[:top_k]
         for rank, (item_idx, score) in enumerate(candidate_rows, start=1):
             rows.append(
                 {
@@ -2434,6 +2513,29 @@ def _ann_candidates_from_vectors(
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _ann_candidates_from_vectors(
+    item_embeddings: np.ndarray,
+    ann_index: AnnoyIndex,
+    query_vectors: np.ndarray,
+    examples: pd.DataFrame,
+    split_artifacts: SplitArtifacts,
+    top_k: int,
+    source_name: str,
+    inject_target_if_missing: bool = True,
+) -> pd.DataFrame:
+    query_specs_by_example = [[(_normalize_rows(np.asarray(query_vector, dtype=np.float32))[0], 1.0)] for query_vector in query_vectors]
+    return _ann_candidates_from_query_specs(
+        item_embeddings,
+        ann_index,
+        query_specs_by_example,
+        examples,
+        split_artifacts,
+        top_k,
+        source_name,
+        inject_target_if_missing=inject_target_if_missing,
+    )
 
 
 def train_content_retriever(prepared: PreparedArtifacts, split_artifacts: SplitArtifacts) -> RetrieverArtifacts:
@@ -2494,9 +2596,10 @@ def train_latent_cf_retriever(prepared: PreparedArtifacts, split_artifacts: Spli
         ),
         shape=(len(split_artifacts.user_id_to_idx), len(prepared.item_features)),
     ).tocsr()
+    weighted_matrix = TfidfTransformer(norm=None, use_idf=True, smooth_idf=True, sublinear_tf=True).fit_transform(matrix)
     component_cap = min(prepared.config.latent_cf_components, max(2, min(matrix.shape) - 1))
     svd = TruncatedSVD(n_components=component_cap, random_state=prepared.config.seed)
-    user_vectors = svd.fit_transform(matrix).astype(np.float32)
+    user_vectors = svd.fit_transform(weighted_matrix).astype(np.float32)
     item_vectors = svd.components_.T.astype(np.float32)
     user_vectors = _normalize_rows(user_vectors)
     item_vectors = _normalize_rows(item_vectors)
@@ -2511,7 +2614,7 @@ def train_latent_cf_retriever(prepared: PreparedArtifacts, split_artifacts: Spli
         ann_index_path=ann_index_path,
         ann_index=_load_ann_index(item_vectors.shape[1], ann_index_path),
         metrics=pd.DataFrame(),
-        history={"explained_variance": [float(svd.explained_variance_ratio_.sum())]},
+        history={"explained_variance": [float(svd.explained_variance_ratio_.sum())], "implicit_weighting": "tfidf_sublinear"},
         retriever_kind="vector",
         metadata={"user_vectors": user_vectors},
     )
@@ -2590,11 +2693,14 @@ def generate_candidates(
             if retriever.ann_index_path is None:
                 raise ValueError(f"Retriever {retriever.variant} is missing its ANN index.")
             retriever.ann_index = _load_ann_index(retriever.item_embeddings.shape[1], retriever.ann_index_path)
-        query_vectors = _vector_retriever_queries(prepared, retriever, examples)
-        return _ann_candidates_from_vectors(
+        query_specs_by_example = [
+            _weighted_vector_query_specs(prepared, retriever, example)
+            for _, example in examples.iterrows()
+        ]
+        return _ann_candidates_from_query_specs(
             retriever.item_embeddings,
             retriever.ann_index,
-            query_vectors,
+            query_specs_by_example,
             examples,
             split_artifacts,
             top_k,
@@ -3102,6 +3208,104 @@ def _candidate_metadata_from_example(example: pd.Series) -> Record:
     }
 
 
+def _candidate_source_balance_quotas(top_k: int) -> dict[str, int]:
+    fractions = {
+        "cooccurrence": 0.40,
+        "latent_cf": 0.25,
+        "content_based": 0.20,
+        "popularity": 0.15,
+    }
+    quotas = {source_name: int(math.floor(top_k * fraction)) for source_name, fraction in fractions.items()}
+    remainder = max(top_k - sum(quotas.values()), 0)
+    for source_name in ("cooccurrence", "latent_cf", "content_based", "popularity"):
+        if remainder <= 0:
+            break
+        quotas[source_name] += 1
+        remainder -= 1
+    return quotas
+
+
+def _source_sorted_candidates(example_rows: pd.DataFrame, source_name: str) -> pd.DataFrame:
+    flag_column = f"from_{source_name}"
+    rank_column = f"rank_{source_name}"
+    if flag_column not in example_rows.columns:
+        return example_rows.iloc[0:0].copy()
+    subset = example_rows[example_rows[flag_column].fillna(0).astype(int) == 1].copy()
+    if subset.empty:
+        return subset
+    if rank_column not in subset.columns:
+        subset[rank_column] = np.inf
+    subset[rank_column] = pd.to_numeric(subset[rank_column], errors="coerce").fillna(np.inf)
+    return subset.sort_values([rank_column, "union_score", "source_count"], ascending=[True, False, False])
+
+
+def _select_candidate_union_rows(example_rows: pd.DataFrame, config: PipelineConfig, top_k: int) -> pd.DataFrame:
+    if example_rows.empty:
+        return example_rows.copy()
+    sorted_rows = example_rows.sort_values(["union_score", "source_count"], ascending=[False, False]).copy()
+    if not config.candidate_source_balance_enabled:
+        return sorted_rows.head(top_k).copy()
+    selected_items: set[int] = set()
+    selected_rows: list[Record] = []
+    quotas = _candidate_source_balance_quotas(top_k)
+
+    def _selected_source_count(source_name: str) -> int:
+        flag_column = f"from_{source_name}"
+        if not selected_rows or flag_column not in example_rows.columns:
+            return 0
+        count = 0
+        for row in selected_rows:
+            try:
+                if int(float(row.get(flag_column, 0) or 0)) == 1:
+                    count += 1
+            except (TypeError, ValueError):
+                continue
+        return count
+
+    def _append_row(row: pd.Series) -> bool:
+        item_idx = int(row["item_idx"])
+        if item_idx in selected_items:
+            return False
+        selected_items.add(item_idx)
+        selected_rows.append(row.to_dict())
+        return True
+
+    for source_name, quota in quotas.items():
+        needed = max(int(quota) - _selected_source_count(source_name), 0)
+        if needed <= 0:
+            continue
+        for _, row in _source_sorted_candidates(sorted_rows, source_name).iterrows():
+            if _append_row(row):
+                needed -= 1
+            if needed <= 0 or len(selected_rows) >= top_k:
+                break
+        if len(selected_rows) >= top_k:
+            break
+    if len(selected_rows) < top_k:
+        for _, row in sorted_rows.iterrows():
+            _append_row(row)
+            if len(selected_rows) >= top_k:
+                break
+    selected = pd.DataFrame(selected_rows)
+    if selected.empty:
+        return sorted_rows.head(top_k).copy()
+    return selected.sort_values(["union_score", "source_count"], ascending=[False, False]).head(top_k).copy()
+
+
+def _prune_ranker_candidates(candidates: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
+    if candidates.empty:
+        return candidates.copy()
+    rows: list[pd.DataFrame] = []
+    for _, group in candidates.groupby("example_id", sort=False):
+        if config.candidate_source_balance_enabled and "union_score" in group.columns:
+            rows.append(_select_candidate_union_rows(group.copy(), config, config.ranker_candidate_top_k))
+        else:
+            rows.append(group.sort_values("retrieval_score", ascending=False).head(config.ranker_candidate_top_k).copy())
+    if not rows:
+        return candidates.iloc[0:0].copy()
+    return pd.concat(rows, ignore_index=True)
+
+
 def generate_candidate_union(
     prepared: PreparedArtifacts,
     split_artifacts: SplitArtifacts,
@@ -3157,29 +3361,26 @@ def generate_candidate_union(
                 row[f"rank_{source_name}"] = int(candidate.rank)
                 row["source_count"] += 1
                 row["union_score"] += source_weights[source_name] / max(int(candidate.rank), 1)
-        if len(item_map) < top_k:
-            popularity_frame = grouped_frames["popularity"].get_group(example_id) if example_id in grouped_frames["popularity"].groups else None
-            if popularity_frame is not None:
-                for candidate in popularity_frame.itertuples(index=False):
-                    item_idx = int(candidate.item_idx)
-                    row = item_map.setdefault(
-                        item_idx,
-                        {
-                            **example_meta,
-                            "item_idx": item_idx,
-                            "label": int(item_idx == example_meta["target_item_idx"]),
-                            "source_count": 0,
-                            "union_score": 0.0,
-                        },
-                    )
-                    row.setdefault("from_popularity", 1)
-                    row.setdefault("score_popularity", float(candidate.retrieval_score))
-                    row.setdefault("rank_popularity", int(candidate.rank))
-                    if row["source_count"] == 0:
-                        row["source_count"] = 1
-                    row["union_score"] += source_weights["popularity"] / max(int(candidate.rank), 1)
-                    if len(item_map) >= top_k:
-                        break
+        popularity_frame = grouped_frames["popularity"].get_group(example_id) if example_id in grouped_frames["popularity"].groups else None
+        if popularity_frame is not None:
+            for candidate in popularity_frame.itertuples(index=False):
+                item_idx = int(candidate.item_idx)
+                row = item_map.setdefault(
+                    item_idx,
+                    {
+                        **example_meta,
+                        "item_idx": item_idx,
+                        "label": int(item_idx == example_meta["target_item_idx"]),
+                        "source_count": 0,
+                        "union_score": 0.0,
+                    },
+                )
+                if not int(row.get("from_popularity", 0) or 0):
+                    row["source_count"] += 1
+                row["from_popularity"] = 1
+                row.setdefault("score_popularity", float(candidate.retrieval_score))
+                row.setdefault("rank_popularity", int(candidate.rank))
+                row["union_score"] += source_weights["popularity"] / max(int(candidate.rank), 1)
         target_item_idx = int(example_meta["target_item_idx"])
         if inject_target_if_missing and str(example_meta["split"]) != "inference" and target_item_idx not in item_map:
             item_map[target_item_idx] = {
@@ -3218,7 +3419,7 @@ def generate_candidate_union(
             example_rows[f"score_{source_name}"] = example_rows.get(f"score_{source_name}", 0.0)
             example_rows[f"rank_{source_name}"] = example_rows.get(f"rank_{source_name}", budget + 1)
         example_rows["union_score"] = example_rows["union_score"].astype(float)
-        example_rows = example_rows.sort_values(["union_score", "source_count"], ascending=[False, False]).head(top_k).copy()
+        example_rows = _select_candidate_union_rows(example_rows, prepared.config, top_k)
         example_rows["retrieval_score"] = example_rows["union_score"]
         example_rows["rank"] = np.arange(1, len(example_rows) + 1, dtype=np.int32)
         rows.append(example_rows)
@@ -3737,12 +3938,7 @@ def run_candidate_recovery_diagnostics(
                 scenario=scenario,
             )
         )
-        pruned = (
-            candidates.sort_values(["example_id", "retrieval_score"], ascending=[True, False])
-            .groupby("example_id", group_keys=False)
-            .head(prepared.config.ranker_candidate_top_k)
-            .reset_index(drop=True)
-        )
+        pruned = _prune_ranker_candidates(candidates, prepared.config)
         total_ranker_candidate_rows += int(len(pruned))
         pruned_with_context = _add_candidate_item_context(prepared, pruned)
         diagnostics_frames.append(
@@ -4225,12 +4421,7 @@ def _ranker_candidates_for_examples(
                 inject_target_if_missing=inject_target_if_missing,
                 include_candidate_sources=False,
             )
-            pruned = (
-                candidates.sort_values(["example_id", "retrieval_score"], ascending=[True, False])
-                .groupby("example_id", group_keys=False)
-                .head(prepared.config.ranker_candidate_top_k)
-                .reset_index(drop=True)
-            )
+            pruned = _prune_ranker_candidates(candidates, prepared.config)
             candidate_batches.append(pruned)
             del candidates
             gc.collect()
@@ -4307,12 +4498,7 @@ def evaluate_ranker(
             )
             union_diagnostics.to_csv(prepared.config.eval_dir / f"{variant}_{split_name}_candidate_union_diagnostics_metrics.csv", index=False)
             union_diagnostic_frames.append(union_diagnostics)
-            candidate_frame = (
-                union_frame.sort_values(["example_id", "retrieval_score"], ascending=[True, False])
-                .groupby("example_id", group_keys=False)
-                .head(prepared.config.ranker_candidate_top_k)
-                .reset_index(drop=True)
-            )
+            candidate_frame = _prune_ranker_candidates(union_frame, prepared.config)
             del union_frame
             del union_with_context
         else:
@@ -4950,6 +5136,8 @@ def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
             {"name": "popularity_backfill_k", "value": config.popularity_backfill_k},
             {"name": "category_backfill_enabled", "value": config.category_backfill_enabled},
             {"name": "recency_cooccurrence_enabled", "value": config.recency_cooccurrence_enabled},
+            {"name": "candidate_source_balance_enabled", "value": config.candidate_source_balance_enabled},
+            {"name": "vector_retriever_trigger_count", "value": config.vector_retriever_trigger_count},
             {"name": "candidate_union_top_k", "value": config.candidate_union_top_k},
             {"name": "candidate_union_batch_size", "value": config.candidate_union_batch_size},
             {"name": "ranker_candidate_top_k", "value": config.ranker_candidate_top_k},

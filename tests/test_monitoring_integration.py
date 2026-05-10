@@ -40,6 +40,10 @@ def test_monitoring_summary_is_persisted_and_exposed_via_api(test_settings, trai
     assert candidate_summary is not None
     assert candidate_summary["bundle_version"] == bundle.manifest.version
     assert candidate_summary["worst_slices"]
+    assert any(
+        row.get("name") == "popularity" and int(row.get("examples", 0) or 0) > 0
+        for row in candidate_summary["source_summary"]
+    )
 
     for user_id in ("u1", "u2"):
         items = container.recommendation_service.recommend(user_id=user_id, top_k=5)
