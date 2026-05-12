@@ -6,6 +6,7 @@ import gzip
 import json
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -108,7 +109,12 @@ def build_synthetic_workspace(root: Path) -> Path:
 
 @pytest.fixture
 def workspace_dir(request) -> Path:
-    root = Path(__file__).resolve().parent / ".tmp" / f"{request.node.name}-{uuid4().hex}"
+    scratch_root = Path(tempfile.gettempdir()) / "amazon_recsys_pytest"
+    if sys.platform.startswith("win"):
+        c_tmp = Path("C:/tmp")
+        if c_tmp.exists():
+            scratch_root = c_tmp / "amazon_recsys_pytest"
+    root = scratch_root / f"{request.node.name}-{uuid4().hex}"
     root.mkdir(parents=True, exist_ok=False)
     yield root
     shutil.rmtree(root, ignore_errors=True)

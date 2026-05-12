@@ -11,6 +11,7 @@ import pandas as pd
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import EvaluationMetricPreview, EvaluationSummary, MlflowRunInfo
 from amazon_recsys.ml import core
+from amazon_recsys.ml.io_utils import set_artifact_write_mode
 from amazon_recsys.observability.mlflow import MLflowTracker
 
 
@@ -288,6 +289,7 @@ def _pipeline_default(field_name: str) -> object:
 
 
 def pipeline_config_from_settings(settings: AppSettings) -> core.PipelineConfig:
+    set_artifact_write_mode(settings.artifact_write_mode)
     config = core.PipelineConfig(
         base_dir=settings.legacy_workspace_root,
         categories=settings.data.categories,

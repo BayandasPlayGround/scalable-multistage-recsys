@@ -17,7 +17,45 @@ def _temporary_path(path: Path, *, suffix: str | None = None) -> Path:
     return final.parent / f".{final.stem}.{uuid4().hex}.tmp{extension}"
 
 
+def _is_onedrive_path(path: Path) -> bool:
+    resolved = str(Path(path).resolve()).lower()
+    if "onedrive" in resolved:
+        return True
+    for env_name in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
+        root = os.environ.get(env_name)
+        if root and resolved.startswith(str(Path(root).resolve()).lower()):
+            return True
+    return False
+
+
+def _artifact_write_mode(path: Path) -> str:
+    """Choose the least surprising artifact write behavior for the current storage root.
+
+    ``atomic`` writes are safest against partial files, but they create temp files and rapid
+    replace/copy operations that can look like ransomware behavior on OneDrive-managed endpoints.
+    ``auto`` therefore uses direct writes under OneDrive and atomic writes elsewhere. Override with:
+
+    * ``AMAZON_RECSYS_ARTIFACT_WRITE_MODE=direct`` for endpoint-security-friendly local runs.
+    * ``AMAZON_RECSYS_ARTIFACT_WRITE_MODE=atomic`` for non-synced production artifact roots.
+    """
+    raw = os.environ.get("AMAZON_RECSYS_ARTIFACT_WRITE_MODE", "auto").strip().lower()
+    if raw in {"direct", "atomic"}:
+        return raw
+    if raw not in {"", "auto"}:
+        raise ValueError("AMAZON_RECSYS_ARTIFACT_WRITE_MODE must be one of: auto, direct, atomic.")
+    return "direct" if _is_onedrive_path(path) else "atomic"
+
+
+def set_artifact_write_mode(mode: str) -> None:
+    normalized = str(mode).strip().lower()
+    if normalized not in {"auto", "direct", "atomic"}:
+        raise ValueError("artifact write mode must be one of: auto, direct, atomic.")
+    os.environ["AMAZON_RECSYS_ARTIFACT_WRITE_MODE"] = normalized
+
+
 def atomic_replace(temp_path: Path, final_path: Path) -> None:
+    if Path(temp_path).resolve() == Path(final_path).resolve():
+        return
     last_error: OSError | None = None
     for attempt in range(8):
         try:
@@ -52,6 +90,10 @@ def _safe_unlink(path: Path) -> None:
 def atomic_write_json(path: Path, payload: object, *, default=None, indent: int = 2) -> None:
     final = Path(path)
     final.parent.mkdir(parents=True, exist_ok=True)
+    if _artifact_write_mode(final) == "direct":
+        with open(final, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=indent, default=default)
+        return
     temp_path = _temporary_path(final, suffix=".json")
     try:
         with open(temp_path, "w", encoding="utf-8") as handle:
@@ -65,6 +107,9 @@ def atomic_write_json(path: Path, payload: object, *, default=None, indent: int 
 def atomic_write_parquet(path: Path, frame: pd.DataFrame, **kwargs) -> None:
     final = Path(path)
     final.parent.mkdir(parents=True, exist_ok=True)
+    if _artifact_write_mode(final) == "direct":
+        frame.to_parquet(final, **kwargs)
+        return
     temp_path = _temporary_path(final, suffix=".parquet")
     try:
         frame.to_parquet(temp_path, **kwargs)
@@ -77,6 +122,9 @@ def atomic_write_parquet(path: Path, frame: pd.DataFrame, **kwargs) -> None:
 def atomic_save_npy(path: Path, array: np.ndarray) -> None:
     final = Path(path)
     final.parent.mkdir(parents=True, exist_ok=True)
+    if _artifact_write_mode(final) == "direct":
+        np.save(final, array)
+        return
     temp_path = _temporary_path(final, suffix=".npy")
     try:
         np.save(temp_path, array)
@@ -89,6 +137,9 @@ def atomic_save_npy(path: Path, array: np.ndarray) -> None:
 def open_atomic_memmap(path: Path, *, dtype: str | np.dtype, shape: tuple[int, ...]) -> tuple[np.memmap, Path]:
     final = Path(path)
     final.parent.mkdir(parents=True, exist_ok=True)
+    if _artifact_write_mode(final) == "direct":
+        memmap = np.lib.format.open_memmap(final, mode="w+", dtype=dtype, shape=shape)
+        return memmap, final
     temp_path = _temporary_path(final, suffix=".npy")
     temp_path.unlink(missing_ok=True)
     memmap = np.lib.format.open_memmap(temp_path, mode="w+", dtype=dtype, shape=shape)

@@ -267,10 +267,11 @@ def train_blair_retriever(
         atomic_replace(temp_embedding_path, embedding_path)
     except Exception:
         if temp_embedding_path is not None:
-            try:
-                temp_embedding_path.unlink(missing_ok=True)
-            except PermissionError:
-                pass
+            if temp_embedding_path.resolve() != embedding_path.resolve():
+                try:
+                    temp_embedding_path.unlink(missing_ok=True)
+                except PermissionError:
+                    pass
         raise
 
     item_embeddings = np.load(embedding_path, mmap_mode="r")

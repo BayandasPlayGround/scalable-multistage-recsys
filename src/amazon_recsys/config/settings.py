@@ -137,6 +137,7 @@ class AppSettings(BaseSettings):
     debug: bool = True
     log_level: str = "INFO"
     workspace_root: Path = Field(default_factory=default_workspace_root)
+    artifact_write_mode: str = "auto"
 
     host: str = "0.0.0.0"
     port: int = 8000
@@ -235,6 +236,14 @@ class AppSettings(BaseSettings):
         if value not in VALID_RUN_PROFILES:
             raise ValueError(f"run_profile must be one of {sorted(VALID_RUN_PROFILES)}.")
         return value
+
+    @field_validator("artifact_write_mode")
+    @classmethod
+    def _validate_artifact_write_mode(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"auto", "direct", "atomic"}:
+            raise ValueError("artifact_write_mode must be one of: auto, direct, atomic.")
+        return normalized
 
     @field_validator("ranker_backend")
     @classmethod
@@ -473,6 +482,7 @@ class AppSettings(BaseSettings):
             "environment": self.environment,
             "debug": self.debug,
             "workspace_root": str(self.workspace_root),
+            "artifact_write_mode": self.artifact_write_mode,
             "legacy_workspace_root": str(self.legacy_workspace_root),
             "data": self.data.model_dump(mode="json"),
             "training": self.training.model_dump(mode="json"),
