@@ -22,6 +22,8 @@ from scipy import sparse
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfTransformer, TfidfVectorizer
 
+from amazon_recsys.ml.io_utils import atomic_save_npy, atomic_write_json, atomic_write_parquet
+
 try:
     import xgboost as xgb
 except ModuleNotFoundError:
@@ -99,6 +101,13 @@ class PipelineConfig:
     in_batch_weight: float = 0.15
     dat_mimic_weight: float = 0.10
     dat_category_alignment_weight: float = 0.05
+    blair_model_name: str = "hyp1231/blair-roberta-base"
+    blair_fallback_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    blair_batch_size: int = 64
+    blair_max_seq_length: int = 256
+    blair_projection_dim: int = 256
+    blair_ann_trees: int = 10
+    blair_chunk_rows: int = 25_000
     ann_trees: int = 50
     retrieval_top_k: int = 100
     eval_user_cap: int | None = 1_000
@@ -116,6 +125,11 @@ class PipelineConfig:
     ranker_train_example_cap: int = 2_000
     ranker_val_example_cap: int | None = 1_000
     ranker_negatives_per_positive: int = 10
+    # Comma-separated weights for ranker negative sampling, in the order
+    # ``popularity,cooccurrence,random``. The default ``"0,0,1.0"`` reproduces the legacy
+    # uniform-random behaviour exactly. Set to e.g. ``"0.6,0.3,0.1"`` to bias negatives toward
+    # popularity-weighted + cooccurrence-hard samples, which is the recommended Phase-D mix.
+    ranker_hardneg_mix: str = "0,0,1.0"
     ranker_batch_size: int = 512
     ranker_epochs: int = 3
     candidate_union_batch_size: int = 500
@@ -132,6 +146,7 @@ class PipelineConfig:
     training_verbose: int = 2
     tf_prefetch_batches: int = 1
     memory_map_item_text: bool = True
+    min_free_disk_gb: float | None = None
 
     def __post_init__(self) -> None:
         self.base_dir = Path(self.base_dir)
@@ -149,11 +164,12 @@ class PipelineConfig:
         valid_ranker_backends = {"xgboost", "dlrm"}
         if self.ranker_backend not in valid_ranker_backends:
             raise ValueError(f"ranker_backend must be one of {sorted(valid_ranker_backends)}.")
-        valid_neural_variants = {"two_tower", "dat_lite"}
+        valid_neural_variants = {"two_tower", "dat_lite", "blair_text"}
         if self.neural_retriever_variant not in valid_neural_variants:
             raise ValueError(f"neural_retriever_variant must be one of {sorted(valid_neural_variants)}.")
         if float(self.dev_hard_negative_multiplier) <= 0 or float(self.dev_neutral_multiplier) <= 0:
             raise ValueError("Dev sampling multipliers must be positive.")
+        _parse_hardneg_mix(self.ranker_hardneg_mix)  # raises early on malformed config
         if int(self.retriever_validation_negatives_per_positive) <= 0:
             raise ValueError("retriever_validation_negatives_per_positive must be positive.")
         if int(self.retriever_quality_min_history) < 1:
@@ -162,6 +178,14 @@ class PipelineConfig:
             raise ValueError("retriever_logit_scale must be positive.")
         if float(self.dat_mimic_weight) < 0 or float(self.dat_category_alignment_weight) < 0:
             raise ValueError("DAT loss weights must be non-negative.")
+        if int(self.blair_projection_dim) < 0:
+            raise ValueError("blair_projection_dim must be zero or positive.")
+        if int(self.blair_ann_trees) <= 0:
+            raise ValueError("blair_ann_trees must be positive.")
+        if int(self.blair_chunk_rows) <= 0:
+            raise ValueError("blair_chunk_rows must be positive.")
+        if self.min_free_disk_gb is not None and float(self.min_free_disk_gb) < 0:
+            raise ValueError("min_free_disk_gb must be non-negative.")
 
     @property
     def data_dir(self) -> Path:
@@ -361,7 +385,7 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "retriever_train_example_cap": 100_000,
             "retriever_quality_min_history": 3,
             "enable_neural_retriever": True,
-            "neural_retriever_variant": "dat_lite",
+            "neural_retriever_variant": "blair_text",
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
             "candidate_source_balance_enabled": True,
@@ -375,7 +399,7 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "neural_candidate_k": 250,
             "popularity_backfill_k": 100,
             "ranker_candidate_top_k": 250,
-            "ranker_train_example_cap": 5_000,
+            "ranker_train_example_cap": 10_000,
             "ranker_val_example_cap": 1_000,
             "split_eval_example_cap": 2_000,
         },
@@ -384,7 +408,7 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "retriever_train_example_cap": None,
             "retriever_quality_min_history": 3,
             "enable_neural_retriever": True,
-            "neural_retriever_variant": "dat_lite",
+            "neural_retriever_variant": "blair_text",
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
             "candidate_source_balance_enabled": True,
@@ -573,8 +597,7 @@ def _load_raw_category_row_counts(config: PipelineConfig, force: bool = False) -
             raise FileNotFoundError(f"Review file not found: {source_path}")
         counts[category] = _count_jsonl_rows(source_path, max_rows=config.max_rows_per_category)
         category_bar.set_postfix(rows=counts[category])
-    with open(counts_path, "w", encoding="utf-8") as handle:
-        json.dump(counts, handle, indent=2)
+    atomic_write_json(counts_path, counts)
     return counts
 
 
@@ -805,7 +828,7 @@ def load_metadata(
 
 def _flush_records_to_parquet(records: list[Record], output_path: Path) -> None:
     if records:
-        pd.DataFrame(records).to_parquet(output_path, index=False)
+        atomic_write_parquet(output_path, pd.DataFrame(records), index=False)
 
 
 def _extract_review_signals(config: PipelineConfig, force: bool = False) -> tuple[pd.DataFrame, Path, Path]:
@@ -1030,8 +1053,8 @@ def _compute_k_core_sets(config: PipelineConfig, positive_dir: Path, force: bool
     if valid_users is None or valid_items is None:
         raise RuntimeError("Failed to compute k-core sets")
     pd.DataFrame(iteration_rows).to_csv(kcore_stats_path, index=False)
-    pd.DataFrame({"user_id": sorted(valid_users)}).to_parquet(valid_users_path, index=False)
-    pd.DataFrame({"parent_asin": sorted(valid_items)}).to_parquet(valid_items_path, index=False)
+    atomic_write_parquet(valid_users_path, pd.DataFrame({"user_id": sorted(valid_users)}), index=False)
+    atomic_write_parquet(valid_items_path, pd.DataFrame({"parent_asin": sorted(valid_items)}), index=False)
     LOGGER.info("k-core complete: users=%s items=%s", f"{len(valid_users):,}", f"{len(valid_items):,}")
     return pd.DataFrame(iteration_rows), valid_users, valid_items
 
@@ -1086,19 +1109,26 @@ def _load_filtered_interactions(
 
 def _fit_text_features(config: PipelineConfig, item_table: pd.DataFrame) -> tuple[TfidfVectorizer, TruncatedSVD, np.ndarray]:
     texts = item_table["item_text"].fillna("").tolist()
-    vectorizer = TfidfVectorizer(max_features=config.text_max_features, ngram_range=(1, 2), min_df=2)
+    # Use unigrams only and a slightly higher min_df: bigrams on a 1.24M-doc fit roughly double
+    # the per-doc index-list peak that drove a MemoryError inside sklearn's _count_vocab on
+    # tight-RAM machines. Defaults stay configurable via text_max_features.
+    vectorizer = TfidfVectorizer(max_features=config.text_max_features, ngram_range=(1, 1), min_df=5)
     LOGGER.info(
         "Fitting text features: items=%s max_features=%s svd_dim=%s",
         f"{len(item_table):,}",
         config.text_max_features,
         config.text_svd_dim,
     )
+    gc.collect()  # release pandas-side intermediates before the heavy sparse build
     try:
         tfidf = vectorizer.fit_transform(texts)
     except ValueError:
         text_matrix = np.zeros((len(item_table), config.text_svd_dim), dtype=np.float32)
         svd = TruncatedSVD(n_components=1, random_state=config.seed)
         return vectorizer, svd, text_matrix
+    finally:
+        del texts  # release the 1.24M-element python list as soon as the sparse matrix is built
+        gc.collect()
     target_dim = min(config.text_svd_dim, max(2, tfidf.shape[1] - 1)) if tfidf.shape[1] > 2 else min(tfidf.shape[1], 2)
     if tfidf.shape[1] <= 1 or tfidf.shape[0] <= 2:
         text_matrix = np.zeros((len(item_table), config.text_svd_dim), dtype=np.float32)
@@ -1238,10 +1268,10 @@ def prepare_corpus(
                 "No interactions survived preprocessing. If dev_mode is enabled, increase dev_fraction or lower k_core. "
                 "If dev_mode is disabled, inspect the raw review files and metadata coverage."
             )
-        interactions.to_parquet(interactions_path, index=False)
-        hard_negatives.to_parquet(hard_negatives_path, index=False)
-        item_features.to_parquet(item_features_path, index=False)
-        np.save(item_text_path, item_text_matrix)
+        atomic_write_parquet(interactions_path, interactions, index=False)
+        atomic_write_parquet(hard_negatives_path, hard_negatives, index=False)
+        atomic_write_parquet(item_features_path, item_features, index=False)
+        atomic_save_npy(item_text_path, item_text_matrix)
         with open(vectorizer_path, "wb") as handle:
             pickle.dump(vectorizer, handle)
         with open(svd_path, "wb") as handle:
@@ -2266,12 +2296,14 @@ def build_ann_index(
     config: PipelineConfig,
     item_embeddings: np.ndarray,
     output_path: Path,
+    *,
+    ann_trees: int | None = None,
 ) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     index = AnnoyIndex(item_embeddings.shape[1], "angular")
     for row_index, embedding in enumerate(item_embeddings):
         index.add_item(row_index, embedding.tolist())
-    index.build(config.ann_trees)
+    index.build(int(ann_trees or config.ann_trees))
     index.save(str(output_path))
     return output_path
 
@@ -2696,7 +2728,7 @@ def _vector_retriever_queries(
                     vector = np.zeros((retriever.item_embeddings.shape[1],), dtype=np.float32)
             query_vectors.append(vector.astype(np.float32, copy=False))
         return _normalize_rows(np.stack(query_vectors).astype(np.float32))
-    if retriever.variant in {"two_tower", "dat_lite"}:
+    if retriever.variant in {"two_tower", "dat_lite", "blair_text"}:
         query_vectors = []
         for row in examples.itertuples(index=False):
             history = _normalize_history_item_idxs(getattr(row, "history_item_idxs"))
@@ -2889,7 +2921,11 @@ def evaluate_retriever(
             stage="retriever",
         )
         diagnostics.to_csv(prepared.config.eval_dir / f"{retriever.variant}_{split_name}_candidate_diagnostics_metrics.csv", index=False)
-        candidates_with_context.to_parquet(prepared.config.eval_dir / f"{retriever.variant}_{split_name}_retrieval_candidates.parquet", index=False)
+        atomic_write_parquet(
+            prepared.config.eval_dir / f"{retriever.variant}_{split_name}_retrieval_candidates.parquet",
+            candidates_with_context,
+            index=False,
+        )
     if not eval_frames:
         return _normalize_metrics_frame(None)
     return _normalize_metrics_frame(pd.concat(eval_frames, ignore_index=True))
@@ -3022,7 +3058,7 @@ def train_retriever(
     gc.collect()
     ann_index_path = build_ann_index(config, item_embeddings, config.model_dir / f"{variant}_item_index.ann")
     model.save_weights(config.model_dir / f"{variant}_retriever.weights.h5")
-    np.save(config.model_dir / f"{variant}_item_embeddings.npy", item_embeddings)
+    atomic_save_npy(config.model_dir / f"{variant}_item_embeddings.npy", item_embeddings)
     retriever_metadata = {
         "variant": variant,
         "retriever_kind": "neural",
@@ -3032,8 +3068,7 @@ def train_retriever(
         "train_examples_used": int(len(train_examples)),
         "val_examples_used": int(len(val_examples)),
     }
-    with open(config.model_dir / f"{variant}_retriever_metadata.json", "w", encoding="utf-8") as handle:
-        json.dump(retriever_metadata, handle, indent=2)
+    atomic_write_json(config.model_dir / f"{variant}_retriever_metadata.json", retriever_metadata)
     if config.persist_encoder_models:
         user_encoder.save(config.model_dir / f"{variant}_user_encoder.keras", overwrite=True)
         item_encoder.save(config.model_dir / f"{variant}_item_encoder.keras", overwrite=True)
@@ -3073,7 +3108,11 @@ def train_retrievers(prepared: PreparedArtifacts, split_artifacts: SplitArtifact
     if prepared.config.enable_neural_retriever:
         neural_variant = prepared.config.neural_retriever_variant
         LOGGER.info("Training neural retriever: variant=%s source_alias=two_tower", neural_variant)
-        neural_retriever = train_retriever(prepared, split_artifacts, variant=neural_variant)
+        if neural_variant == "blair_text":
+            from amazon_recsys.ml.retrievers.blair import train_blair_retriever
+            neural_retriever = train_blair_retriever(prepared, split_artifacts)
+        else:
+            neural_retriever = train_retriever(prepared, split_artifacts, variant=neural_variant)
         if _retriever_recovers_positives(neural_retriever.metrics):
             neural_retriever.metadata["source_alias"] = "two_tower"
             retrievers["two_tower"] = neural_retriever
@@ -4405,11 +4444,95 @@ def _build_ranker_model(config: PipelineConfig, num_users: int, num_items: int, 
     return model
 
 
-def _rebalance_ranker_candidates(candidates: pd.DataFrame, negatives_per_positive: int, seed: int) -> pd.DataFrame:
+def _parse_hardneg_mix(value: str) -> tuple[float, float, float]:
+    """Parse ``"<popularity>,<cooccurrence>,<random>"`` into a normalised weight triple.
+
+    Raises ``ValueError`` on any malformed input so the failure surfaces at config-construction
+    time (via ``PipelineConfig.__post_init__``) rather than 5 minutes into training.
+    """
+    parts = [chunk.strip() for chunk in str(value).split(",") if chunk.strip()]
+    if len(parts) != 3:
+        raise ValueError("ranker_hardneg_mix must be three comma-separated weights for popularity,cooccurrence,random.")
+    try:
+        weights = tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError(f"ranker_hardneg_mix weights must be numeric, got {value!r}.") from exc
+    if any(weight < 0 for weight in weights):
+        raise ValueError("ranker_hardneg_mix weights must be non-negative.")
+    total = sum(weights)
+    if total <= 0:
+        raise ValueError("ranker_hardneg_mix weights must sum to a positive value.")
+    normalised = tuple(weight / total for weight in weights)
+    return normalised  # type: ignore[return-value]
+
+
+def _sample_negatives_by_source_mix(
+    negatives: pd.DataFrame,
+    target_count: int,
+    mix_weights: tuple[float, float, float],
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    """Draw ``target_count`` negatives biased by source: (popularity, cooccurrence, random).
+
+    The negatives passed in already come from the candidate-union sources (each row has a
+    ``source`` column). For each row whose ``source`` is ``popularity`` or ``cooccurrence`` we
+    treat it as belonging to the corresponding pool; everything else (latent_cf, content_based,
+    two_tower, etc.) is the "random" pool.
+
+    Short pools are topped up from any remaining negatives so the final count matches
+    ``target_count`` whenever enough negatives exist.
+
+    When ``mix_weights == (0, 0, 1)`` the function reduces to pure uniform random sampling —
+    bit-for-bit identical to the legacy behaviour for the same RNG seed.
+    """
+    if negatives.empty or target_count <= 0:
+        return negatives.iloc[0:0].copy()
+    if len(negatives) <= target_count:
+        return negatives
+
+    pop_weight, cooc_weight, _rand_weight = mix_weights
+    if pop_weight + cooc_weight <= 0:
+        return negatives.sample(n=target_count, random_state=int(rng.integers(0, 1_000_000)))
+
+    source = negatives.get("source")
+    if source is None:
+        return negatives.sample(n=target_count, random_state=int(rng.integers(0, 1_000_000)))
+
+    pop_pool = negatives[source == "popularity"]
+    cooc_pool = negatives[source == "cooccurrence"]
+    rand_pool = negatives[~source.isin({"popularity", "cooccurrence"})]
+
+    pop_target = int(round(target_count * pop_weight))
+    cooc_target = int(round(target_count * cooc_weight))
+    rand_target = max(0, target_count - pop_target - cooc_target)
+
+    def _draw(pool: pd.DataFrame, count: int) -> pd.DataFrame:
+        if pool.empty or count <= 0:
+            return pool.iloc[0:0].copy()
+        if len(pool) <= count:
+            return pool.copy()
+        return pool.sample(n=count, random_state=int(rng.integers(0, 1_000_000)))
+
+    drawn = pd.concat([_draw(pop_pool, pop_target), _draw(cooc_pool, cooc_target), _draw(rand_pool, rand_target)], ignore_index=False)
+    deficit = target_count - len(drawn)
+    if deficit > 0:
+        remaining = negatives.drop(drawn.index, errors="ignore")
+        if not remaining.empty:
+            drawn = pd.concat([drawn, _draw(remaining, deficit)], ignore_index=False)
+    return drawn
+
+
+def _rebalance_ranker_candidates(
+    candidates: pd.DataFrame,
+    negatives_per_positive: int,
+    seed: int,
+    hardneg_mix: str = "0,0,1.0",
+) -> pd.DataFrame:
     if candidates.empty or negatives_per_positive <= 0:
         return candidates
     sampled_groups: list[pd.DataFrame] = []
     rng = np.random.default_rng(seed)
+    mix_weights = _parse_hardneg_mix(hardneg_mix)
     for _, group in candidates.groupby("example_id", sort=False):
         positives = group[group["label"] == 1]
         negatives = group[group["label"] == 0]
@@ -4418,7 +4541,7 @@ def _rebalance_ranker_candidates(candidates: pd.DataFrame, negatives_per_positiv
             continue
         max_negatives = max(len(positives) * negatives_per_positive, negatives_per_positive)
         if len(negatives) > max_negatives:
-            negatives = negatives.sample(n=max_negatives, random_state=int(rng.integers(0, 1_000_000)))
+            negatives = _sample_negatives_by_source_mix(negatives, max_negatives, mix_weights, rng)
         sampled_groups.append(pd.concat([positives, negatives], ignore_index=True).sort_values("rank"))
     return pd.concat(sampled_groups, ignore_index=True)
 
@@ -4619,7 +4742,11 @@ def evaluate_ranker(
                 split=split_name,
             )
             candidate_recovery_frames.append(recovery_payload["diagnostics"])
-        ranked_with_context.to_parquet(prepared.config.eval_dir / f"{metrics.iloc[0]['variant']}_{split_name}_ranked_candidates.parquet", index=False)
+        atomic_write_parquet(
+            prepared.config.eval_dir / f"{metrics.iloc[0]['variant']}_{split_name}_ranked_candidates.parquet",
+            ranked_with_context,
+            index=False,
+        )
         del candidate_frame
         del candidate_frame_with_context
         del ranker_metadata
@@ -4688,8 +4815,18 @@ def train_ranker(
         val_examples,
         inject_target_if_missing=True,
     )
-    train_candidates = _rebalance_ranker_candidates(train_candidates, config.ranker_negatives_per_positive, config.seed)
-    val_candidates = _rebalance_ranker_candidates(val_candidates, config.ranker_negatives_per_positive, config.seed)
+    train_candidates = _rebalance_ranker_candidates(
+        train_candidates,
+        config.ranker_negatives_per_positive,
+        config.seed,
+        hardneg_mix=config.ranker_hardneg_mix,
+    )
+    val_candidates = _rebalance_ranker_candidates(
+        val_candidates,
+        config.ranker_negatives_per_positive,
+        config.seed,
+        hardneg_mix=config.ranker_hardneg_mix,
+    )
     LOGGER.info(
         "Ranker candidate tables ready: train_candidates=%s val_candidates=%s",
         f"{len(train_candidates):,}",
@@ -5230,7 +5367,6 @@ def save_config(config: PipelineConfig) -> Path:
     config_path = config.artifact_root / "config.json"
     serializable = asdict(config)
     serializable["base_dir"] = str(config.base_dir)
-    with open(config_path, "w", encoding="utf-8") as handle:
-        json.dump(serializable, handle, indent=2)
+    atomic_write_json(config_path, serializable)
     return config_path
 

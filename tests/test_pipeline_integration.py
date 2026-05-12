@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from amazon_recsys.api.app import create_app
+from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.ml import bundles
 from amazon_recsys.ml import core
 from amazon_recsys.ml.pipelines import pipeline_config_from_settings
@@ -617,21 +618,43 @@ def test_quality_profile_raises_debug_sized_candidate_budgets(test_settings, cap
 
 
 @pytest.mark.retrieval
-def test_quality_neural_profile_defaults_to_dat_lite_and_neural_budget_floors(test_settings, caplog) -> None:
+def test_quality_neural_profile_defaults_to_blair_and_neural_budget_floors(test_settings, caplog) -> None:
     settings = test_settings.model_copy(update={"run_profile": "quality-neural"})
 
     with caplog.at_level("WARNING"):
         config = pipeline_config_from_settings(settings)
 
     assert config.enable_neural_retriever is True
-    assert config.neural_retriever_variant == "dat_lite"
+    assert config.neural_retriever_variant == "blair_text"
     assert config.candidate_union_top_k == 650
     assert config.ranker_candidate_top_k == 250
     assert config.neural_candidate_k == 250
     assert "Candidate budget settings were below the quality-neural profile floor" in caplog.text
 
-    override = pipeline_config_from_settings(settings.model_copy(update={"neural_retriever_variant": "two_tower"}))
+    override = pipeline_config_from_settings(
+        settings.model_copy(update={"enable_neural_retriever": True, "neural_retriever_variant": "two_tower"})
+    )
     assert override.neural_retriever_variant == "two_tower"
+
+
+@pytest.mark.retrieval
+def test_quality_neural_profile_applies_scale_defaults_when_not_explicit(workspace_dir: Path) -> None:
+    settings = AppSettings(
+        workspace_root=workspace_dir,
+        data_dir=Path("amazon_review_data"),
+        run_name="prod-pytest-blair-v1",
+        run_profile="quality-neural",
+        metadata_download_if_missing=False,
+    )
+
+    config = pipeline_config_from_settings(settings)
+
+    assert config.enable_neural_retriever is True
+    assert config.neural_retriever_variant == "blair_text"
+    assert config.eval_user_cap == 2_000
+    assert config.ranker_train_example_cap == 10_000
+    assert config.candidate_union_top_k == 650
+    assert config.ranker_candidate_top_k == 250
 
 
 @pytest.mark.retrieval
