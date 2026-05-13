@@ -1,13 +1,121 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from amazon_recsys.config.settings import MonitoringConfig
 from amazon_recsys.domain.entities import ConceptDriftResult, MonitoringSummary, ReferenceProfile
 from amazon_recsys.monitoring.metrics import categorical_profile, compute_concept_drift, compute_feature_drifts, numeric_profile
+from amazon_recsys.monitoring import reference
+
+
+def test_reference_recommendation_sample_uses_split_history_items(monkeypatch) -> None:
+    prepared = SimpleNamespace(
+        item_features=pd.DataFrame(
+            [
+                {
+                    "item_idx": 1,
+                    "parent_asin": "A1",
+                    "source_category": "All_Beauty",
+                    "price": 10.0,
+                    "average_rating": 4.5,
+                    "train_positive_count": 7,
+                },
+                {
+                    "item_idx": 2,
+                    "parent_asin": "A2",
+                    "source_category": "Automotive",
+                    "price": 20.0,
+                    "average_rating": 4.0,
+                    "train_positive_count": 3,
+                },
+            ]
+        ),
+        item_idx_to_id={1: "A1", 2: "A2"},
+    )
+    split_artifacts = SimpleNamespace(
+        test_examples=pd.DataFrame(
+            [
+                {
+                    "user_id": "user-with-brittle-history",
+                    "history_length": 1,
+                    "history_item_idxs": np.array([1]),
+                }
+            ]
+        )
+    )
+    session = SimpleNamespace(prepared=prepared, split_artifacts=split_artifacts, retrievers={}, ranker=None)
+    captured: dict[str, object] = {}
+
+    def fake_recommend(*args, **kwargs):
+        captured.update(kwargs)
+        return pd.DataFrame(
+            [
+                {
+                    "parent_asin": "A2",
+                    "source_category": "Automotive",
+                    "price": 20.0,
+                    "average_rating": 4.0,
+                    "score": 0.9,
+                    "candidate_sources": "content_based",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(reference.core, "recommend", fake_recommend)
+
+    frame = reference._recommendation_sample_frame(session, monitored_k=10)
+
+    assert captured["history_items"] == ["A1"]
+    assert captured["user_id"] == "user-with-brittle-history"
+    assert frame.attrs["attempted_reference_users"] == 1
+    assert frame.attrs["skipped_reference_users"] == 0
+    assert frame.iloc[0]["item_id"] == "A2"
+
+
+def test_reference_recommendation_sample_skips_unusable_monitoring_users(monkeypatch) -> None:
+    prepared = SimpleNamespace(
+        item_features=pd.DataFrame(
+            [
+                {
+                    "item_idx": 1,
+                    "parent_asin": "A1",
+                    "source_category": "All_Beauty",
+                    "price": 10.0,
+                    "average_rating": 4.5,
+                    "train_positive_count": 7,
+                }
+            ]
+        ),
+        item_idx_to_id={1: "A1"},
+    )
+    split_artifacts = SimpleNamespace(
+        test_examples=pd.DataFrame(
+            [
+                {
+                    "user_id": "user-with-stale-history",
+                    "history_length": 1,
+                    "history_item_idxs": np.array([1]),
+                }
+            ]
+        )
+    )
+    session = SimpleNamespace(prepared=prepared, split_artifacts=split_artifacts, retrievers={}, ranker=None)
+
+    def fake_recommend(*args, **kwargs):
+        raise ValueError("No usable history items were found in the current item catalog.")
+
+    monkeypatch.setattr(reference.core, "recommend", fake_recommend)
+
+    frame = reference._recommendation_sample_frame(session, monitored_k=10)
+
+    assert frame.empty
+    assert frame.attrs["attempted_reference_users"] == 1
+    assert frame.attrs["skipped_reference_users"] == 1
 
 
 def test_feature_drifts_raise_alerts_for_large_distribution_shifts() -> None:

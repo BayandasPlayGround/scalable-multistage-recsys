@@ -9,6 +9,7 @@ import pandas as pd
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import InferenceLogRecord, MonitoringSummary, OutcomeIngestResult, OutcomeLogRecord, OutcomeSimulationResult, RecommendationItem, ReferenceProfile, RuntimeBundle, utcnow_iso
 from amazon_recsys.domain.protocols import ArtifactStore, MonitoringStore
+from amazon_recsys.ml import core
 from amazon_recsys.monitoring.metrics import (
     MONITORED_K,
     compute_concept_drift,
@@ -334,6 +335,81 @@ class MonitoringService:
         resolved_bundle_version = self._resolve_bundle_version(bundle_version)
         summaries = self.monitoring_store.list_summaries(resolved_bundle_version)
         ordered = sorted(summaries, key=lambda item: pd.to_datetime(item.window_end, utc=True))
+        if limit <= 0:
+            return ordered
+        return ordered[-int(limit):]
+
+    def _frame_records(self, frame: pd.DataFrame) -> list[dict[str, object]]:
+        if frame.empty:
+            return []
+        safe = frame.astype(object).where(pd.notna(frame), None)
+        return safe.to_dict(orient="records")
+
+    def run_candidate_diagnostics(
+        self,
+        *,
+        bundle_version: str = "active",
+        split: str = "test",
+        sample_size: int = 500,
+        persist: bool = True,
+    ) -> dict[str, object]:
+        resolved_bundle_version = self._resolve_bundle_version(bundle_version)
+        manifest = self.artifact_store.load_manifest(resolved_bundle_version)
+        bundle = self.artifact_store.load_bundle(manifest)
+        if bundle.prepared is None or bundle.split_artifacts is None:
+            raise ValueError("The selected bundle does not include the artifacts required for candidate diagnostics.")
+        if split == "test":
+            examples = bundle.split_artifacts.test_examples
+        elif split == "val":
+            examples = bundle.split_artifacts.val_examples
+        else:
+            raise ValueError("split must be either 'val' or 'test'.")
+        if sample_size and len(examples) > int(sample_size):
+            examples = examples.sample(n=int(sample_size), random_state=bundle.prepared.config.seed).sort_values("example_id")
+
+        diagnostics_payload = core.run_candidate_recovery_diagnostics(
+            bundle.prepared,
+            bundle.split_artifacts,
+            bundle.retrievers,
+            examples,
+            split=split,
+            bundle_version=manifest.version,
+        )
+        diagnostics = diagnostics_payload["diagnostics"]
+        output_frames = diagnostics_payload["output_frames"]
+        worst_slices = output_frames["candidate_recall_worst_slices"]
+        overall_rows = diagnostics[(diagnostics["scope"] == "overall")].copy() if not diagnostics.empty else pd.DataFrame()
+        source_rows = diagnostics[(diagnostics["scope"] == "candidate_source")].copy() if not diagnostics.empty else pd.DataFrame()
+        cold_start_rows = diagnostics[(diagnostics["scope"] == "cold_start_user_type")].copy() if not diagnostics.empty else pd.DataFrame()
+        summary: dict[str, object] = {
+            "created_at": utcnow_iso(),
+            "bundle_version": manifest.version,
+            "split": split,
+            "sample_size": int(len(examples)),
+            "candidate_rows": int(diagnostics_payload["candidate_rows"]),
+            "ranker_candidate_rows": int(diagnostics_payload["ranker_candidate_rows"]),
+            "diagnostics": self._frame_records(diagnostics),
+            "overall": self._frame_records(overall_rows),
+            "source_summary": self._frame_records(source_rows),
+            "cold_start_summary": self._frame_records(cold_start_rows),
+            "worst_slices": self._frame_records(worst_slices),
+        }
+        if persist:
+            artifact_paths = self.monitoring_store.save_candidate_diagnostics(summary, diagnostics, worst_slices)
+            mlflow_payload = self.mlflow_tracker.log_candidate_diagnostics(summary, artifact_paths)
+            if mlflow_payload is not None:
+                summary["mlflow"] = mlflow_payload.to_dict()
+                self.monitoring_store.save_candidate_diagnostics(summary, diagnostics, worst_slices)
+        return summary
+
+    def latest_candidate_diagnostics(self, bundle_version: str = "active") -> dict[str, object] | None:
+        resolved_bundle_version = self._resolve_bundle_version(bundle_version)
+        return self.monitoring_store.load_latest_candidate_diagnostics(resolved_bundle_version)
+
+    def recent_candidate_diagnostics(self, bundle_version: str = "active", *, limit: int = 8) -> list[dict[str, object]]:
+        resolved_bundle_version = self._resolve_bundle_version(bundle_version)
+        summaries = self.monitoring_store.list_candidate_diagnostics(resolved_bundle_version)
+        ordered = sorted(summaries, key=lambda item: pd.to_datetime(item.get("created_at"), utc=True))
         if limit <= 0:
             return ordered
         return ordered[-int(limit):]

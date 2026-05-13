@@ -8,8 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_CATEGORIES = ("All_Beauty", "Automotive", "Industrial_and_Scientific")
-VALID_RUN_PROFILES = {"debug", "quality", "quality-neural", "full"}
+VALID_RUN_PROFILES = {"debug", "medium-neural", "quality", "quality-neural", "full"}
 VALID_RANKER_BACKENDS = {"xgboost", "dlrm"}
+VALID_NEURAL_RETRIEVER_VARIANTS = {"two_tower", "dat_lite", "blair_text"}
+VALID_GATE_PROFILES = {"off", "recovery-v1", "blair-v1"}
 
 
 def default_workspace_root() -> Path:
@@ -33,10 +35,23 @@ class TrainingConfig(BaseModel):
     eval_user_cap: int | None = 250
     train_positive_cap: int = 2_000_000
     split_eval_example_cap: int | None = None
+    min_free_disk_gb: float | None = None
 
 
 class RetrievalConfig(BaseModel):
     enable_neural_retriever: bool = False
+    neural_retriever_variant: str = "two_tower"
+    dat_mimic_weight: float = 0.10
+    dat_category_alignment_weight: float = 0.05
+    blair_model_name: str = "hyp1231/blair-roberta-base"
+    blair_fallback_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    blair_batch_size: int = 64
+    blair_max_seq_length: int = 256
+    blair_projection_dim: int = 256
+    blair_ann_trees: int = 10
+    blair_chunk_rows: int = 25_000
+    blair_device: str = "auto"
+    blair_item_cap: int | None = None
     retrieval_top_k: int = 50
     candidate_union_top_k: int = 75
     candidate_union_batch_size: int = 100
@@ -46,6 +61,8 @@ class RetrievalConfig(BaseModel):
     neural_candidate_k: int = 50
     category_backfill_enabled: bool = True
     recency_cooccurrence_enabled: bool = True
+    candidate_source_balance_enabled: bool = True
+    vector_retriever_trigger_count: int = 5
 
 
 class RankingConfig(BaseModel):
@@ -54,11 +71,16 @@ class RankingConfig(BaseModel):
     ranker_train_example_cap: int = 1_000
     ranker_val_example_cap: int | None = 250
     ranker_negatives_per_positive: int = 5
+    ranker_hardneg_mix: str = "0,0,1.0"
     xgb_learning_rate: float = 0.05
     xgb_n_estimators: int = 100
     xgb_max_depth: int = 6
     xgb_subsample: float = 0.8
     xgb_colsample_bytree: float = 0.8
+
+
+class GateConfig(BaseModel):
+    profile: str = "off"
 
 
 class ServingConfig(BaseModel):
@@ -77,6 +99,7 @@ class MLflowConfig(BaseModel):
     experiment_name: str = "amazon-recsys"
     backend_root: Path
     run_name_prefix: str = ""
+    log_full_bundle: bool = False
 
 
 class MonitoringConfig(BaseModel):
@@ -116,6 +139,7 @@ class AppSettings(BaseSettings):
     debug: bool = True
     log_level: str = "INFO"
     workspace_root: Path = Field(default_factory=default_workspace_root)
+    artifact_write_mode: str = "auto"
 
     host: str = "0.0.0.0"
     port: int = 8000
@@ -134,6 +158,7 @@ class AppSettings(BaseSettings):
     mlflow_experiment_name: str = "amazon-recsys"
     mlflow_backend_root: Path = Path("mlflow_runs")
     mlflow_run_name_prefix: str = ""
+    mlflow_log_full_bundle: bool = False
     monitoring_enabled: bool = False
     monitoring_root: Path = Path("artifacts/amazon_recsys/monitoring")
     monitoring_window_days: int = 1
@@ -157,8 +182,21 @@ class AppSettings(BaseSettings):
     eval_user_cap: int | None = 250
     train_positive_cap: int = 2_000_000
     split_eval_example_cap: int | None = None
+    min_free_disk_gb: float | None = None
 
     enable_neural_retriever: bool = False
+    neural_retriever_variant: str = "two_tower"
+    dat_mimic_weight: float = 0.10
+    dat_category_alignment_weight: float = 0.05
+    blair_model_name: str = "hyp1231/blair-roberta-base"
+    blair_fallback_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    blair_batch_size: int = 64
+    blair_max_seq_length: int = 256
+    blair_projection_dim: int = 256
+    blair_ann_trees: int = 10
+    blair_chunk_rows: int = 25_000
+    blair_device: str = "auto"
+    blair_item_cap: int | None = None
     retrieval_top_k: int = 50
     candidate_union_top_k: int = 75
     candidate_union_batch_size: int = 100
@@ -168,17 +206,22 @@ class AppSettings(BaseSettings):
     neural_candidate_k: int = 50
     category_backfill_enabled: bool = True
     recency_cooccurrence_enabled: bool = True
+    candidate_source_balance_enabled: bool = True
+    vector_retriever_trigger_count: int = 5
 
     ranker_backend: str = "xgboost"
     ranker_candidate_top_k: int = 25
     ranker_train_example_cap: int = 1_000
     ranker_val_example_cap: int | None = 250
     ranker_negatives_per_positive: int = 5
+    ranker_hardneg_mix: str = "0,0,1.0"
     xgb_learning_rate: float = 0.05
     xgb_n_estimators: int = 100
     xgb_max_depth: int = 6
     xgb_subsample: float = 0.8
     xgb_colsample_bytree: float = 0.8
+
+    gate_profile: str = "off"
 
     azure_subscription_id: str = ""
     azure_resource_group: str = "rg-amazon-recsys"
@@ -198,11 +241,52 @@ class AppSettings(BaseSettings):
             raise ValueError(f"run_profile must be one of {sorted(VALID_RUN_PROFILES)}.")
         return value
 
+    @field_validator("artifact_write_mode")
+    @classmethod
+    def _validate_artifact_write_mode(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"auto", "direct", "atomic"}:
+            raise ValueError("artifact_write_mode must be one of: auto, direct, atomic.")
+        return normalized
+
+    @field_validator("blair_device")
+    @classmethod
+    def _validate_blair_device(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"auto", "cpu", "cuda"}:
+            raise ValueError("blair_device must be one of: auto, cpu, cuda.")
+        return normalized
+
+    @field_validator("blair_item_cap", mode="before")
+    @classmethod
+    def _validate_blair_item_cap(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
+            return None
+        if value is not None and int(value) <= 0:
+            raise ValueError("blair_item_cap must be positive when set.")
+        return int(value)
+
     @field_validator("ranker_backend")
     @classmethod
     def _validate_ranker_backend(cls, value: str) -> str:
         if value not in VALID_RANKER_BACKENDS:
             raise ValueError(f"ranker_backend must be one of {sorted(VALID_RANKER_BACKENDS)}.")
+        return value
+
+    @field_validator("neural_retriever_variant")
+    @classmethod
+    def _validate_neural_retriever_variant(cls, value: str) -> str:
+        if value not in VALID_NEURAL_RETRIEVER_VARIANTS:
+            raise ValueError(f"neural_retriever_variant must be one of {sorted(VALID_NEURAL_RETRIEVER_VARIANTS)}.")
+        return value
+
+    @field_validator("gate_profile")
+    @classmethod
+    def _validate_gate_profile(cls, value: str) -> str:
+        if value not in VALID_GATE_PROFILES:
+            raise ValueError(f"gate_profile must be one of {sorted(VALID_GATE_PROFILES)}.")
         return value
 
     @field_validator("dev_fraction")
@@ -307,12 +391,25 @@ class AppSettings(BaseSettings):
             eval_user_cap=self.eval_user_cap,
             train_positive_cap=self.train_positive_cap,
             split_eval_example_cap=self.split_eval_example_cap,
+            min_free_disk_gb=self.min_free_disk_gb,
         )
 
     @property
     def retrieval(self) -> RetrievalConfig:
         return RetrievalConfig(
             enable_neural_retriever=self.enable_neural_retriever,
+            neural_retriever_variant=self.neural_retriever_variant,
+            dat_mimic_weight=self.dat_mimic_weight,
+            dat_category_alignment_weight=self.dat_category_alignment_weight,
+            blair_model_name=self.blair_model_name,
+            blair_fallback_model=self.blair_fallback_model,
+            blair_batch_size=self.blair_batch_size,
+            blair_max_seq_length=self.blair_max_seq_length,
+            blair_projection_dim=self.blair_projection_dim,
+            blair_ann_trees=self.blair_ann_trees,
+            blair_chunk_rows=self.blair_chunk_rows,
+            blair_device=self.blair_device,
+            blair_item_cap=self.blair_item_cap,
             retrieval_top_k=self.retrieval_top_k,
             candidate_union_top_k=self.candidate_union_top_k,
             candidate_union_batch_size=self.candidate_union_batch_size,
@@ -322,6 +419,8 @@ class AppSettings(BaseSettings):
             neural_candidate_k=self.neural_candidate_k,
             category_backfill_enabled=self.category_backfill_enabled,
             recency_cooccurrence_enabled=self.recency_cooccurrence_enabled,
+            candidate_source_balance_enabled=self.candidate_source_balance_enabled,
+            vector_retriever_trigger_count=self.vector_retriever_trigger_count,
         )
 
     @property
@@ -332,12 +431,17 @@ class AppSettings(BaseSettings):
             ranker_train_example_cap=self.ranker_train_example_cap,
             ranker_val_example_cap=self.ranker_val_example_cap,
             ranker_negatives_per_positive=self.ranker_negatives_per_positive,
+            ranker_hardneg_mix=self.ranker_hardneg_mix,
             xgb_learning_rate=self.xgb_learning_rate,
             xgb_n_estimators=self.xgb_n_estimators,
             xgb_max_depth=self.xgb_max_depth,
             xgb_subsample=self.xgb_subsample,
             xgb_colsample_bytree=self.xgb_colsample_bytree,
         )
+
+    @property
+    def gate(self) -> GateConfig:
+        return GateConfig(profile=self.gate_profile)
 
     @property
     def serving(self) -> ServingConfig:
@@ -359,6 +463,7 @@ class AppSettings(BaseSettings):
             experiment_name=self.mlflow_experiment_name,
             backend_root=self.resolved_mlflow_backend_root,
             run_name_prefix=self.mlflow_run_name_prefix,
+            log_full_bundle=self.mlflow_log_full_bundle,
         )
 
     @property
@@ -402,6 +507,7 @@ class AppSettings(BaseSettings):
             "environment": self.environment,
             "debug": self.debug,
             "workspace_root": str(self.workspace_root),
+            "artifact_write_mode": self.artifact_write_mode,
             "legacy_workspace_root": str(self.legacy_workspace_root),
             "data": self.data.model_dump(mode="json"),
             "training": self.training.model_dump(mode="json"),
@@ -411,6 +517,7 @@ class AppSettings(BaseSettings):
             "mlflow": self.mlflow.model_dump(mode="json"),
             "monitoring": self.monitoring.model_dump(mode="json"),
             "azure": self.azure.model_dump(mode="json"),
+            "gate": self.gate.model_dump(mode="json"),
             "legacy_artifact_root": str(self.legacy_artifact_root),
         }
 

@@ -14,6 +14,7 @@ import pandas as pd
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import BundleManifest, EvaluationSummary, RuntimeBundle
 from amazon_recsys.ml import core
+from amazon_recsys.ml.io_utils import atomic_save_npy, atomic_write_json, atomic_write_parquet
 from amazon_recsys.ml.onnx import ONNXRankerPredictor, export_xgboost_ranker_to_onnx
 
 if TYPE_CHECKING:
@@ -22,6 +23,145 @@ if TYPE_CHECKING:
 
 ONNX_BUNDLE_FORMAT = "onnx"
 ONNX_BUNDLE_SCHEMA_VERSION = 2
+
+
+class GateValidationError(RuntimeError):
+    """Raised when ``validate_acceptance_gates`` finds a freshly-trained bundle below its floor.
+
+    Carries the full list of failures plus the passing checks for context. The CLI uses this
+    result as an activation guard so a regression cannot be silently promoted.
+    """
+
+
+# Each tuple: (description, csv_filename, filter_dict, metric_column, floor)
+# - ``filter_dict`` matches rows where every column equals the supplied value (string-coerced).
+# - The validator picks the max numeric value among matching rows and compares to ``floor``.
+#
+# Floors are calibrated against the existing prod baseline ``prod-2026-05-10-recovery-v1``
+# (final test recall@100 = 0.052). They are deliberately tight for prod-scale runs and will
+# fail at debug scale. That is intentional. Use ``off`` for non-prod runs.
+GATE_PROFILES: dict[str, tuple[tuple[str, str, dict[str, str], str, float], ...]] = {
+    "off": (),
+    "recovery-v1": (
+        (
+            "final test recall@100 >= 0.052",
+            "hybrid_union_xgboost_ranker_metrics.csv",
+            {"split": "test", "K": "100"},
+            "recall",
+            0.052,
+        ),
+    ),
+    "blair-v1": (
+        (
+            "blair_text retriever recall@100 (test) >= 0.06",
+            "blair_text_retriever_metrics.csv",
+            {"split": "test", "K": "100"},
+            "recall",
+            0.06,
+        ),
+        (
+            "candidate_union recall (overall, test) >= 0.16",
+            "candidate_recall_diagnostics.csv",
+            {"split": "test", "stage": "candidate_union", "scope": "overall", "name": "all"},
+            "hit_rate",
+            0.16,
+        ),
+        (
+            "ranker_candidates recall (overall, test) >= 0.13",
+            "candidate_recall_diagnostics.csv",
+            {"split": "test", "stage": "ranker_candidates", "scope": "overall", "name": "all"},
+            "hit_rate",
+            0.13,
+        ),
+        (
+            "anonymous_no_history candidate_union (test) > 0.052",
+            "candidate_recall_by_cold_start_type.csv",
+            {"split": "test", "stage": "candidate_union", "name": "anonymous_no_history"},
+            "hit_rate",
+            0.052,
+        ),
+        (
+            "Industrial_and_Scientific candidate_union (test) > 0.06",
+            "candidate_recall_by_category.csv",
+            {"split": "test", "stage": "candidate_union", "name": "Industrial_and_Scientific"},
+            "hit_rate",
+            0.06,
+        ),
+        (
+            "final test recall@100 >= 0.07",
+            "hybrid_union_xgboost_ranker_metrics.csv",
+            {"split": "test", "K": "100"},
+            "recall",
+            0.07,
+        ),
+        (
+            "final test recall@10 >= 0.028",
+            "hybrid_union_xgboost_ranker_metrics.csv",
+            {"split": "test", "K": "10"},
+            "recall",
+            0.028,
+        ),
+    ),
+}
+
+
+def validate_acceptance_gates(eval_dir: Path, profile: str) -> list[str]:
+    """Validate numeric acceptance gates against CSVs in ``eval_dir``.
+
+    Returns the list of passing descriptions on success. Raises ``GateValidationError`` listing
+    every failure when at least one gate misses. Profile ``"off"`` is a no-op that returns ``[]``.
+
+    Designed to be called after evaluation summary collection and before activation, so a
+    regression cannot be silently promoted while still leaving training/export artifacts available
+    for review.
+    """
+    if profile not in GATE_PROFILES:
+        raise ValueError(f"Unknown gate profile {profile!r}; valid: {sorted(GATE_PROFILES)}")
+    gates = GATE_PROFILES[profile]
+    if not gates:
+        return []
+    eval_dir = Path(eval_dir)
+    passes: list[str] = []
+    failures: list[str] = []
+    for description, filename, filters, column, floor in gates:
+        csv_path = eval_dir / filename
+        if not csv_path.exists():
+            failures.append(f"{description} -- missing CSV {csv_path.name}")
+            continue
+        try:
+            frame = pd.read_csv(csv_path)
+        except Exception as exc:  # noqa: BLE001 - any read error is a gate failure
+            failures.append(f"{description} -- failed to read {csv_path.name}: {exc}")
+            continue
+        matched = frame
+        for key, expected in filters.items():
+            if key not in matched.columns:
+                matched = matched.iloc[0:0]
+                break
+            matched = matched[matched[key].astype(str) == str(expected)]
+        if matched.empty:
+            failures.append(f"{description} -- no rows in {csv_path.name} match filters {filters}")
+            continue
+        if column not in matched.columns:
+            failures.append(f"{description} -- column {column!r} missing in {csv_path.name}")
+            continue
+        observed = pd.to_numeric(matched[column], errors="coerce").dropna()
+        if observed.empty:
+            failures.append(f"{description} -- no numeric values in {csv_path.name}:{column}")
+            continue
+        value = float(observed.max())
+        if value + 1e-9 < float(floor):
+            failures.append(f"{description} -- observed {value:.4f} < floor {floor:.4f}")
+        else:
+            passes.append(f"{description} -- observed {value:.4f}")
+    if failures:
+        lines = [f"Acceptance gate profile {profile!r} failed for {eval_dir}."]
+        lines.extend(f"  - {item}" for item in failures)
+        if passes:
+            lines.append("Passing checks:")
+            lines.extend(f"  + {item}" for item in passes)
+        raise GateValidationError("\n".join(lines))
+    return passes
 
 
 def generate_bundle_version(run_name: str) -> str:
@@ -110,9 +250,7 @@ def build_runtime_bundle(session: TrainingSession, manifest: BundleManifest) -> 
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(_json_safe(payload), handle, indent=2)
+    atomic_write_json(path, _json_safe(payload))
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -194,8 +332,7 @@ def _hard_negative_from_payload(value: object) -> dict[str, list[tuple[int, int]
 
 
 def _write_frame(path: Path, frame: pd.DataFrame) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_parquet(path, index=False)
+    atomic_write_parquet(path, frame, index=False)
 
 
 def _read_frame(path: Path) -> pd.DataFrame:
@@ -288,7 +425,7 @@ def _write_prepared_artifacts(prepared: core.PreparedArtifacts, bundle_dir: Path
     _write_frame(paths["interactions"], prepared.interactions)
     _write_frame(paths["hard_negatives"], prepared.hard_negatives)
     _write_frame(paths["item_features"], prepared.item_features)
-    np.save(paths["item_text_matrix"], np.asarray(prepared.item_text_matrix, dtype=np.float32))
+    atomic_save_npy(paths["item_text_matrix"], np.asarray(prepared.item_text_matrix, dtype=np.float32))
     return {
         "paths": {key: _relative(path, bundle_dir) for key, path in paths.items()},
         "item_id_to_idx": {str(key): int(value) for key, value in prepared.item_id_to_idx.items()},
@@ -445,6 +582,79 @@ def _load_split_artifacts(
     )
 
 
+# Whitelist of audit-relevant retriever-metadata keys that round-trip through the bundle.
+# Keys must be JSON-safe (no numpy/pandas objects). New keys here will surface in
+# retrievers/<name>/metadata.json under "audit_metadata" without requiring schema changes.
+_AUDIT_METADATA_KEYS: tuple[str, ...] = (
+    "encoder_name",
+    "configured_model_name",
+    "fallback_model_name",
+    "embedding_dim",
+    "raw_embedding_dim",
+    "projection_dim",
+    "chunk_rows",
+    "ann_trees",
+    "batch_size",
+    "max_seq_length",
+    "device",
+    "item_cap",
+    "encoded_item_count",
+    "full_item_count",
+    "serving_query",
+    "item_text_columns",
+    "item_text_source_counts",
+    "source_alias",
+)
+
+
+def _collect_audit_metadata(retriever: core.RetrieverArtifacts) -> dict[str, object]:
+    """Pull JSON-safe audit fields out of retriever.metadata, dropping anything not whitelisted
+    or anything whose value is not JSON-serializable (defends against future regressions where
+    a new key on the whitelist accidentally holds a non-primitive)."""
+    audit: dict[str, object] = {}
+    for key in _AUDIT_METADATA_KEYS:
+        value = retriever.metadata.get(key)
+        if value is None:
+            continue
+        if not _is_json_safe_scalar(value):
+            continue
+        audit[key] = value
+    return audit
+
+
+_JSON_SAFE_SCALAR_TYPES = (str, int, float, bool, type(None))
+
+
+def _is_json_safe_scalar(value: object) -> bool:
+    """Conservative filter: only forward primitives we know cannot break JSON serialization.
+
+    Critically excludes sklearn objects (e.g. ``TruncatedSVD`` stored in ``latent_cf.model``)
+    that historically lived in ``retriever.model`` and were dropped by the legacy export.
+    """
+    if isinstance(value, _JSON_SAFE_SCALAR_TYPES):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_is_json_safe_scalar(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and _is_json_safe_scalar(v) for k, v in value.items())
+    return False
+
+
+def _retriever_model_payload(retriever: core.RetrieverArtifacts) -> dict[str, object]:
+    """Forward JSON-safe entries from ``retriever.model`` (e.g. ``encoder_name`` set by BLAIR)
+    while silently dropping any non-serializable entries that older retriever types may keep
+    there (e.g. sklearn objects on ``latent_cf``).
+    """
+    payload: dict[str, object] = {"retriever": retriever.variant}
+    if isinstance(retriever.model, dict):
+        for key, value in retriever.model.items():
+            if not isinstance(key, str) or key == "retriever":
+                continue
+            if _is_json_safe_scalar(value):
+                payload[key] = value
+    return payload
+
+
 def _write_retriever_artifacts(
     retrievers: dict[str, core.RetrieverArtifacts],
     bundle_dir: Path,
@@ -456,7 +666,7 @@ def _write_retriever_artifacts(
         item_embeddings_path = retriever_dir / "item_embeddings.npy"
         metrics_path = retriever_dir / "metrics.parquet"
         metadata_path = retriever_dir / "metadata.json"
-        np.save(item_embeddings_path, np.asarray(retriever.item_embeddings, dtype=np.float32))
+        atomic_save_npy(item_embeddings_path, np.asarray(retriever.item_embeddings, dtype=np.float32))
         _write_frame(metrics_path, retriever.metrics)
 
         ann_index_path: Path | None = None
@@ -470,17 +680,18 @@ def _write_retriever_artifacts(
         user_vectors = retriever.metadata.get("user_vectors")
         if user_vectors is not None:
             user_vectors_path = retriever_dir / "user_vectors.npy"
-            np.save(user_vectors_path, np.asarray(user_vectors, dtype=np.float32))
+            atomic_save_npy(user_vectors_path, np.asarray(user_vectors, dtype=np.float32))
 
         metadata = {
             "variant": retriever.variant,
             "retriever_kind": retriever.retriever_kind,
             "history": retriever.history,
-            "model": {"retriever": retriever.variant},
+            "model": _retriever_model_payload(retriever),
             "item_embeddings": _relative(item_embeddings_path, bundle_dir),
             "metrics": _relative(metrics_path, bundle_dir),
             "ann_index": _relative(ann_index_path, bundle_dir) if ann_index_path is not None else None,
             "user_vectors": _relative(user_vectors_path, bundle_dir) if user_vectors_path is not None else None,
+            "audit_metadata": _collect_audit_metadata(retriever),
         }
         _write_json(metadata_path, metadata)
         payload[name] = {"metadata": _relative(metadata_path, bundle_dir)}
@@ -499,14 +710,19 @@ def _load_retriever_artifacts(
         user_vectors_path = metadata.get("user_vectors")
         metadata_values: dict[str, object] = {}
         if user_vectors_path is not None:
-            metadata_values["user_vectors"] = np.load(bundle_dir / str(user_vectors_path))
+            metadata_values["user_vectors"] = np.load(bundle_dir / str(user_vectors_path), mmap_mode="r")
+        audit_metadata = metadata.get("audit_metadata")
+        if isinstance(audit_metadata, dict):
+            for key in _AUDIT_METADATA_KEYS:
+                if key in audit_metadata:
+                    metadata_values[key] = audit_metadata[key]
         retrievers[str(name)] = core.RetrieverArtifacts(
             config=config,
             variant=str(metadata["variant"]),
             model=dict(metadata.get("model", {"retriever": name})),
             item_encoder=None,
             user_encoder=None,
-            item_embeddings=np.load(bundle_dir / str(metadata["item_embeddings"])),
+            item_embeddings=np.load(bundle_dir / str(metadata["item_embeddings"]), mmap_mode="r"),
             ann_index_path=(bundle_dir / str(metadata["ann_index"])) if metadata.get("ann_index") is not None else None,
             ann_index=None,
             metrics=_read_frame(bundle_dir / str(metadata["metrics"])),

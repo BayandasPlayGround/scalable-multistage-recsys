@@ -122,3 +122,14 @@ class MonitoringSummaryResponse(BaseModel):
 class MonitoringHistoryResponse(BaseModel):
     total: int
     items: list[JsonObject] = Field(default_factory=list)
+
+
+class CandidateDiagnosticsResponse(BaseModel):
+    available: bool
+    bundle_version: str | None = None
+    summary: JsonObject = Field(default_factory=dict)
+
+
+class CandidateDiagnosticsHistoryResponse(BaseModel):
+    total: int
+    items: list[JsonObject] = Field(default_factory=list)

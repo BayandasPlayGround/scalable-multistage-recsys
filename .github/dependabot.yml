@@ -28,4 +28,5 @@ updates:
     open-pull-requests-limit: 5
     ignore:
       - dependency-name: "python"
-        versions: ["3.13*"]
+        # Docker ignores use version requirement syntax, not wildcard syntax.
+        versions: [">= 3.14"]

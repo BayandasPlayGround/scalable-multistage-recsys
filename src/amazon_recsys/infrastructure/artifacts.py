@@ -6,6 +6,7 @@ from pathlib import Path
 
 from amazon_recsys.config.settings import AppSettings
 from amazon_recsys.domain.entities import ActiveBundlePointer, BundleManifest, RuntimeBundle, utcnow_iso
+from amazon_recsys.ml.io_utils import atomic_write_json, set_artifact_write_mode
 from amazon_recsys.ml.bundles import (
     ONNX_BUNDLE_FORMAT,
     build_bundle_manifest,
@@ -21,12 +22,11 @@ from amazon_recsys.ml.pipelines import TrainingSession
 class LocalArtifactStore:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
+        set_artifact_write_mode(settings.artifact_write_mode)
         self.settings.ensure_runtime_directories()
 
     def _write_json(self, path: Path, payload: dict[str, object]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+        atomic_write_json(path, payload)
 
     def _read_json(self, path: Path) -> dict[str, object]:
         with open(path, "r", encoding="utf-8") as handle:
