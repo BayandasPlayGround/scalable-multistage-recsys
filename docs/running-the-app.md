@@ -281,6 +281,54 @@ python -m amazon_recsys.cli.main export-bundle --run-name prod-2026-05-13-blair-
 
 Do not activate until the BLAIR retriever metrics, candidate recall diagnostics, and final ranker metrics beat the previous active bundle.
 
+### Activating A Reviewed Bundle
+
+Activation is a separate step from export unless you pass `--activate` during `export-bundle`. For production-style runs, prefer exporting first, reviewing the results, then activating explicitly.
+
+Before activation, check the exported bundle and candidate diagnostics:
+
+```powershell
+python -m amazon_recsys.cli.main diagnose-candidates --bundle-version medium-2026-05-13-blair-v1 --split test --sample-size 500 --persist
+```
+
+Activate only after you are happy with the metrics:
+
+```powershell
+$env:AMAZON_RECSYS_ENVIRONMENT="production"
+$env:AMAZON_RECSYS_USE_MOCK_BUNDLE_IF_MISSING="false"
+python -m amazon_recsys.cli.main activate-bundle medium-2026-05-13-blair-v1
+```
+
+For a full production candidate, replace the version with the full bundle version:
+
+```powershell
+python -m amazon_recsys.cli.main activate-bundle prod-2026-05-13-blair-v2
+```
+
+The activation command updates:
+
+```text
+artifacts/production/active_bundle.json
+```
+
+Production activation has a guard. It refuses bundles that look like debug, partial-category, or otherwise non-production artifacts. If you intentionally want to activate such a bundle for a controlled test, use the override explicitly:
+
+```powershell
+python -m amazon_recsys.cli.main activate-bundle medium-2026-05-13-blair-v1 --allow-non-prod-activation
+```
+
+After activation, restart or refresh the running service if needed, then verify:
+
+```powershell
+python -m amazon_recsys.cli.main serve
+```
+
+Check:
+
+- `/ready` returns `200`
+- `/models/active` reports the activated bundle version
+- recommendations are served from the expected bundle
+
 Heavy production-style non-BLAIR experiment:
 
 ```powershell
@@ -360,11 +408,11 @@ artifacts/amazon_recsys/bundles/<bundle-version>/
   runtime_bundle.json
   models/ranker.onnx
   ...
-
-artifacts/production/active_bundle.json
 ```
 
 `config.json` is the resolved internal pipeline config for the run. The evaluation directory contains metric CSV files. The bundle directory is the portable serving unit used by the API.
+
+`artifacts/production/active_bundle.json` is written only when you activate a bundle with `activate-bundle` or with `export-bundle --activate`.
 
 ### Step 4: Start The API And Web App
 
