@@ -539,11 +539,21 @@ class PackageTrainingPipeline:
         gate_profile = self.settings.gate.profile
         if gate_profile and gate_profile != "off":
             # Local import keeps the module-level import graph unchanged.
-            from amazon_recsys.ml.bundles import validate_acceptance_gates
-            LOGGER.info("Validating acceptance gates: profile=%s eval_dir=%s", gate_profile, config.eval_dir)
-            passes = validate_acceptance_gates(Path(config.eval_dir), gate_profile)
-            for line in passes:
-                LOGGER.info("Gate pass: %s", line)
+            from amazon_recsys.ml.bundles import GateValidationError, validate_acceptance_gates
+
+            LOGGER.info("Checking acceptance gates for activation readiness: profile=%s eval_dir=%s", gate_profile, config.eval_dir)
+            try:
+                passes = validate_acceptance_gates(Path(config.eval_dir), gate_profile)
+            except GateValidationError as exc:
+                LOGGER.warning(
+                    "Acceptance gate profile %s did not pass. Training artifacts remain usable, "
+                    "but activation with this gate profile will be refused.\n%s",
+                    gate_profile,
+                    exc,
+                )
+            else:
+                for line in passes:
+                    LOGGER.info("Gate pass: %s", line)
         session = TrainingSession(
             settings=self.settings,
             pipeline_config=config,

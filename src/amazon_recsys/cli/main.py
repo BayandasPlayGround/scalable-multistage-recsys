@@ -256,6 +256,56 @@ def _assert_activation_allowed(
         )
 
 
+def _manifest_eval_dir(manifest: BundleManifest) -> Path | None:
+    if manifest.evaluation_summary_path is None:
+        return None
+    summary_path = Path(manifest.evaluation_summary_path)
+    if not summary_path.exists():
+        return None
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    eval_dir = payload.get("eval_dir")
+    if not eval_dir:
+        return None
+    return Path(str(eval_dir))
+
+
+def _assert_acceptance_gates_allowed(
+    settings: AppSettings,
+    eval_dir: Path | None,
+    *,
+    bundle_version: str,
+) -> None:
+    gate_profile = settings.gate.profile
+    if not gate_profile or gate_profile == "off":
+        return
+    if eval_dir is None:
+        raise RuntimeError(
+            "Activation refused because "
+            f"AMAZON_RECSYS_GATE_PROFILE={gate_profile!r} is enabled but bundle "
+            f"{bundle_version!r} does not expose an evaluation directory. Set "
+            "AMAZON_RECSYS_GATE_PROFILE=off only if this activation is intentional."
+        )
+
+    from amazon_recsys.ml.bundles import GateValidationError, validate_acceptance_gates
+
+    try:
+        passes = validate_acceptance_gates(eval_dir, gate_profile)
+    except GateValidationError as exc:
+        raise RuntimeError(
+            "Activation refused because acceptance gates did not pass for "
+            f"bundle {bundle_version!r} with profile {gate_profile!r}.\n"
+            f"{exc}\n"
+            "The bundle/export artifacts are still available for review, but the active "
+            "bundle pointer was not changed. Set AMAZON_RECSYS_GATE_PROFILE=off only if "
+            "you intentionally want to activate this below-gate bundle."
+        ) from exc
+    for line in passes:
+        LOGGER.info("Activation gate pass: %s", line)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -291,6 +341,11 @@ def main(argv: list[str] | None = None) -> int:
                 manifest,
                 allow_non_prod_activation=args.allow_non_prod_activation,
             )
+            _assert_acceptance_gates_allowed(
+                settings,
+                Path(session.pipeline_config.eval_dir),
+                bundle_version=manifest.version,
+            )
             LOGGER.info("Activating exported bundle: version=%s", manifest.version)
             container.artifact_store.activate_bundle(manifest.version)
             container.recommendation_service.refresh()
@@ -304,6 +359,11 @@ def main(argv: list[str] | None = None) -> int:
             settings,
             manifest,
             allow_non_prod_activation=args.allow_non_prod_activation,
+        )
+        _assert_acceptance_gates_allowed(
+            settings,
+            _manifest_eval_dir(manifest),
+            bundle_version=args.version,
         )
         LOGGER.info("Activating bundle: version=%s", args.version)
         pointer = container.artifact_store.activate_bundle(args.version)

@@ -285,6 +285,8 @@ Do not activate until the BLAIR retriever metrics, candidate recall diagnostics,
 
 Activation is a separate step from export unless you pass `--activate` during `export-bundle`. For production-style runs, prefer exporting first, reviewing the results, then activating explicitly.
 
+`AMAZON_RECSYS_GATE_PROFILE` is an activation guard. Leave it as `off` for exploratory runs. Set it to `recovery-v1` or `blair-v1` only when you want activation to be refused automatically if the evaluated metrics miss the configured floors. A failed gate does not mean training failed; it means the bundle should not be promoted without an explicit decision.
+
 Before activation, check the exported bundle and candidate diagnostics:
 
 ```powershell

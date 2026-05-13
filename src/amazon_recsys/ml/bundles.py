@@ -28,8 +28,8 @@ ONNX_BUNDLE_SCHEMA_VERSION = 2
 class GateValidationError(RuntimeError):
     """Raised when ``validate_acceptance_gates`` finds a freshly-trained bundle below its floor.
 
-    Surfaces before bundle export so a regression cannot be silently activated. Carries the full
-    list of failures plus the passing checks for context.
+    Carries the full list of failures plus the passing checks for context. The CLI uses this
+    result as an activation guard so a regression cannot be silently promoted.
     """
 
 
@@ -39,7 +39,7 @@ class GateValidationError(RuntimeError):
 #
 # Floors are calibrated against the existing prod baseline ``prod-2026-05-10-recovery-v1``
 # (final test recall@100 = 0.052). They are deliberately tight for prod-scale runs and will
-# fail at debug scale — that is intentional. Use ``off`` for non-prod runs.
+# fail at debug scale. That is intentional. Use ``off`` for non-prod runs.
 GATE_PROFILES: dict[str, tuple[tuple[str, str, dict[str, str], str, float], ...]] = {
     "off": (),
     "recovery-v1": (
@@ -111,8 +111,9 @@ def validate_acceptance_gates(eval_dir: Path, profile: str) -> list[str]:
     Returns the list of passing descriptions on success. Raises ``GateValidationError`` listing
     every failure when at least one gate misses. Profile ``"off"`` is a no-op that returns ``[]``.
 
-    Designed to be called after Stage 5 (evaluation summary collection) in the training pipeline,
-    *before* bundle export — so a regression cannot be silently shipped.
+    Designed to be called after evaluation summary collection and before activation, so a
+    regression cannot be silently promoted while still leaving training/export artifacts available
+    for review.
     """
     if profile not in GATE_PROFILES:
         raise ValueError(f"Unknown gate profile {profile!r}; valid: {sorted(GATE_PROFILES)}")
