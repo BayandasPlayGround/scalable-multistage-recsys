@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_CATEGORIES = ("All_Beauty", "Automotive", "Industrial_and_Scientific")
-VALID_RUN_PROFILES = {"debug", "quality", "quality-neural", "full"}
+VALID_RUN_PROFILES = {"debug", "medium-neural", "quality", "quality-neural", "full"}
 VALID_RANKER_BACKENDS = {"xgboost", "dlrm"}
 VALID_NEURAL_RETRIEVER_VARIANTS = {"two_tower", "dat_lite", "blair_text"}
 VALID_GATE_PROFILES = {"off", "recovery-v1", "blair-v1"}
@@ -50,6 +50,8 @@ class RetrievalConfig(BaseModel):
     blair_projection_dim: int = 256
     blair_ann_trees: int = 10
     blair_chunk_rows: int = 25_000
+    blair_device: str = "auto"
+    blair_item_cap: int | None = None
     retrieval_top_k: int = 50
     candidate_union_top_k: int = 75
     candidate_union_batch_size: int = 100
@@ -193,6 +195,8 @@ class AppSettings(BaseSettings):
     blair_projection_dim: int = 256
     blair_ann_trees: int = 10
     blair_chunk_rows: int = 25_000
+    blair_device: str = "auto"
+    blair_item_cap: int | None = None
     retrieval_top_k: int = 50
     candidate_union_top_k: int = 75
     candidate_union_batch_size: int = 100
@@ -244,6 +248,25 @@ class AppSettings(BaseSettings):
         if normalized not in {"auto", "direct", "atomic"}:
             raise ValueError("artifact_write_mode must be one of: auto, direct, atomic.")
         return normalized
+
+    @field_validator("blair_device")
+    @classmethod
+    def _validate_blair_device(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"auto", "cpu", "cuda"}:
+            raise ValueError("blair_device must be one of: auto, cpu, cuda.")
+        return normalized
+
+    @field_validator("blair_item_cap", mode="before")
+    @classmethod
+    def _validate_blair_item_cap(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
+            return None
+        if value is not None and int(value) <= 0:
+            raise ValueError("blair_item_cap must be positive when set.")
+        return int(value)
 
     @field_validator("ranker_backend")
     @classmethod
@@ -385,6 +408,8 @@ class AppSettings(BaseSettings):
             blair_projection_dim=self.blair_projection_dim,
             blair_ann_trees=self.blair_ann_trees,
             blair_chunk_rows=self.blair_chunk_rows,
+            blair_device=self.blair_device,
+            blair_item_cap=self.blair_item_cap,
             retrieval_top_k=self.retrieval_top_k,
             candidate_union_top_k=self.candidate_union_top_k,
             candidate_union_batch_size=self.candidate_union_batch_size,

@@ -7,6 +7,7 @@ network access, and does NOT exercise the full training pipeline.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -165,7 +166,7 @@ def test_train_blair_retriever_with_mock_encoder(monkeypatch: pytest.MonkeyPatch
             assert normalize_embeddings is True
             return np.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]][: len(texts)], dtype=np.float32)
 
-    monkeypatch.setattr(blair, "_load_sentence_transformer", lambda *_a, **_k: (_FakeEncoder(), "fake-encoder"))
+    monkeypatch.setattr(blair, "_load_sentence_transformer", lambda *_a, **_k: (_FakeEncoder(), "fake-encoder", "cpu"))
     monkeypatch.setattr(core, "build_ann_index", lambda *_a, **_k: workspace_dir / "fake.ann")
     monkeypatch.setattr(core, "_load_ann_index", lambda *_a, **_k: object())
     monkeypatch.setattr(
@@ -239,7 +240,7 @@ def test_train_blair_retriever_passes_rich_text_when_metadata_present(monkeypatc
         ]
     )
 
-    monkeypatch.setattr(blair, "_load_sentence_transformer", lambda *_a, **_k: (_FakeEncoder(), "fake-encoder"))
+    monkeypatch.setattr(blair, "_load_sentence_transformer", lambda *_a, **_k: (_FakeEncoder(), "fake-encoder", "cpu"))
     monkeypatch.setattr(blair, "_load_rich_metadata", lambda *_a, **_k: rich_metadata)
     monkeypatch.setattr(core, "build_ann_index", lambda *_a, **_k: workspace_dir / "fake.ann")
     monkeypatch.setattr(core, "_load_ann_index", lambda *_a, **_k: object())
@@ -259,6 +260,90 @@ def test_train_blair_retriever_passes_rich_text_when_metadata_present(monkeypatc
     assert "ESD safe" in captured_texts[0][2]
 
 
+def test_train_blair_retriever_respects_item_cap(monkeypatch: pytest.MonkeyPatch, workspace_dir: Path) -> None:
+    core, prepared = _build_prepared(workspace_dir)
+    prepared.config.blair_item_cap = 2
+    blair = _import_blair()
+    captured_texts: list[list[str]] = []
+
+    class _FakeEncoder:
+        def encode(self, texts, **_kwargs):
+            captured_texts.append(list(texts))
+            return np.asarray([[1.0, 0.0], [0.0, 1.0]][: len(texts)], dtype=np.float32)
+
+    monkeypatch.setattr(blair, "_load_sentence_transformer", lambda *_a, **_k: (_FakeEncoder(), "fake-encoder", "cpu"))
+    monkeypatch.setattr(blair, "_load_rich_metadata", lambda *_a, **_k: None)
+    monkeypatch.setattr(core, "build_ann_index", lambda *_a, **_k: workspace_dir / "fake.ann")
+    monkeypatch.setattr(core, "_load_ann_index", lambda *_a, **_k: object())
+    monkeypatch.setattr(core, "evaluate_retriever", lambda *_a, **_k: pd.DataFrame())
+
+    artifacts = blair.train_blair_retriever(prepared, object())  # type: ignore[arg-type]
+
+    assert artifacts.item_embeddings.shape == (2, 2)
+    assert artifacts.metadata["item_cap"] == 2
+    assert artifacts.metadata["encoded_item_count"] == 2
+    assert captured_texts == [["Lipstick gloss All_Beauty", "Car battery charger Automotive"]]
+
+
+def test_train_blair_retriever_resumes_from_completed_rows(monkeypatch: pytest.MonkeyPatch, workspace_dir: Path) -> None:
+    core, prepared = _build_prepared(workspace_dir)
+    prepared.config.blair_chunk_rows = 1
+    blair = _import_blair()
+    embedding_path = prepared.config.model_dir / "blair_text_item_embeddings.npy"
+    state_path = prepared.config.model_dir / "blair_text_item_embeddings_state.json"
+    existing = np.lib.format.open_memmap(embedding_path, mode="w+", dtype=np.float32, shape=(3, 2))
+    existing[0] = np.asarray([1.0, 0.0], dtype=np.float32)
+    existing.flush()
+    mmap_handle = getattr(existing, "_mmap", None)
+    if mmap_handle is not None:
+        mmap_handle.close()
+    del existing
+    state_path.write_text(
+        json.dumps(
+            {
+                "complete": False,
+                "completed_rows": 1,
+                "item_count": 3,
+                "full_item_count": 3,
+                "item_cap": None,
+                "configured_model_name": prepared.config.blair_model_name,
+                "fallback_model_name": prepared.config.blair_fallback_model,
+                "encoder_name": "fake-encoder",
+                "device": "cpu",
+                "max_seq_length": prepared.config.blair_max_seq_length,
+                "projection_dim": prepared.config.blair_projection_dim,
+                "raw_embedding_dim": 2,
+                "embedding_dim": 2,
+                "chunk_rows": prepared.config.blair_chunk_rows,
+                "seed": prepared.config.seed,
+                "item_text_columns": ["title", "source_category"],
+                "item_text_source_counts": {"rich": 0, "fallback": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured_texts: list[list[str]] = []
+
+    class _FakeEncoder:
+        def encode(self, texts, **_kwargs):
+            captured_texts.append(list(texts))
+            return np.asarray([[0.0, 1.0]][: len(texts)], dtype=np.float32)
+
+    monkeypatch.setattr(blair, "_load_sentence_transformer", lambda *_a, **_k: (_FakeEncoder(), "fake-encoder", "cpu"))
+    monkeypatch.setattr(blair, "_load_rich_metadata", lambda *_a, **_k: None)
+    monkeypatch.setattr(core, "build_ann_index", lambda *_a, **_k: workspace_dir / "fake.ann")
+    monkeypatch.setattr(core, "_load_ann_index", lambda *_a, **_k: object())
+    monkeypatch.setattr(core, "evaluate_retriever", lambda *_a, **_k: pd.DataFrame())
+
+    artifacts = blair.train_blair_retriever(prepared, object())  # type: ignore[arg-type]
+
+    assert artifacts.item_embeddings.shape == (3, 2)
+    assert captured_texts == [["Car battery charger Automotive"], ["Soldering iron kit Industrial_and_Scientific"]]
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["complete"] is True
+    assert state["completed_rows"] == 3
+
+
 def test_load_sentence_transformer_falls_back_when_primary_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     blair = _import_blair()
 
@@ -267,7 +352,7 @@ def test_load_sentence_transformer_falls_back_when_primary_fails(monkeypatch: py
     class _Loader:
         instances: list[str] = []
 
-        def __init__(self, name: str) -> None:
+        def __init__(self, name: str, device: str | None = None) -> None:
             _Loader.instances.append(name)
             if name == "boom/fail":
                 raise RuntimeError("simulated download failure")
@@ -279,7 +364,8 @@ def test_load_sentence_transformer_falls_back_when_primary_fails(monkeypatch: py
 
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
 
-    encoder, name = blair._load_sentence_transformer("boom/fail", "ok/fallback", max_seq_length=128)
+    encoder, name, device = blair._load_sentence_transformer("boom/fail", "ok/fallback", max_seq_length=128, device="cpu")
     assert name == "ok/fallback"
+    assert device == "cpu"
     assert encoder.max_seq_length == 128
     assert _Loader.instances == ["boom/fail", "ok/fallback"]

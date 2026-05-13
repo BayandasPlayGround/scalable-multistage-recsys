@@ -41,6 +41,8 @@ _SETTINGS_TO_CONFIG_FIELDS = {
     "blair_projection_dim": "blair_projection_dim",
     "blair_ann_trees": "blair_ann_trees",
     "blair_chunk_rows": "blair_chunk_rows",
+    "blair_device": "blair_device",
+    "blair_item_cap": "blair_item_cap",
     "retrieval_top_k": "retrieval_top_k",
     "candidate_union_top_k": "candidate_union_top_k",
     "candidate_union_batch_size": "candidate_union_batch_size",
@@ -90,6 +92,7 @@ _PROFILE_CONTROLLED_FIELDS = {
     "ranker_train_example_cap",
     "ranker_val_example_cap",
     "split_eval_example_cap",
+    "blair_item_cap",
 }
 
 _PROFILE_CONTROLLED_SETTING_FIELDS = {
@@ -185,7 +188,7 @@ def _run_preflight_checks(settings: AppSettings, config: core.PipelineConfig) ->
     threshold_gb = (
         float(config.min_free_disk_gb)
         if config.min_free_disk_gb is not None
-        else (40.0 if config.run_profile == "quality-neural" else 5.0)
+        else (40.0 if config.run_profile == "quality-neural" else 20.0 if config.run_profile == "medium-neural" else 5.0)
     )
     free_gb = _disk_free_gb(config.artifact_root)
     if free_gb < threshold_gb:
@@ -314,6 +317,8 @@ def pipeline_config_from_settings(settings: AppSettings) -> core.PipelineConfig:
         blair_projection_dim=settings.retrieval.blair_projection_dim,
         blair_ann_trees=settings.retrieval.blair_ann_trees,
         blair_chunk_rows=settings.retrieval.blair_chunk_rows,
+        blair_device=settings.retrieval.blair_device,
+        blair_item_cap=settings.retrieval.blair_item_cap,
         retrieval_top_k=settings.retrieval.retrieval_top_k,
         candidate_union_top_k=settings.retrieval.candidate_union_top_k,
         candidate_union_batch_size=settings.retrieval.candidate_union_batch_size,
@@ -376,6 +381,15 @@ def _enforce_profile_candidate_budget_floor(config: core.PipelineConfig) -> None
             "latent_cf_candidate_k": 250,
             "content_candidate_k": 250,
             "neural_candidate_k": 250,
+            "popularity_backfill_k": 100,
+        },
+        "medium-neural": {
+            "candidate_union_top_k": 500,
+            "ranker_candidate_top_k": 150,
+            "cooccurrence_candidate_k": 200,
+            "latent_cf_candidate_k": 200,
+            "content_candidate_k": 200,
+            "neural_candidate_k": 200,
             "popularity_backfill_k": 100,
         },
         "full": {

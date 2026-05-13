@@ -108,6 +108,8 @@ class PipelineConfig:
     blair_projection_dim: int = 256
     blair_ann_trees: int = 10
     blair_chunk_rows: int = 25_000
+    blair_device: str = "auto"
+    blair_item_cap: int | None = None
     ann_trees: int = 50
     retrieval_top_k: int = 100
     eval_user_cap: int | None = 1_000
@@ -152,7 +154,7 @@ class PipelineConfig:
         self.base_dir = Path(self.base_dir)
         if not 0 < float(self.dev_fraction) <= 1:
             raise ValueError("dev_fraction must be in the interval (0, 1].")
-        valid_run_profiles = {"debug", "quality", "quality-neural", "full"}
+        valid_run_profiles = {"debug", "medium-neural", "quality", "quality-neural", "full"}
         if self.run_profile not in valid_run_profiles:
             raise ValueError(f"run_profile must be one of {sorted(valid_run_profiles)}.")
         valid_sampling_strategies = {"user", "stratified_user", "category_balanced_user"}
@@ -184,6 +186,11 @@ class PipelineConfig:
             raise ValueError("blair_ann_trees must be positive.")
         if int(self.blair_chunk_rows) <= 0:
             raise ValueError("blair_chunk_rows must be positive.")
+        if str(self.blair_device).strip().lower() not in {"auto", "cpu", "cuda"}:
+            raise ValueError("blair_device must be one of: auto, cpu, cuda.")
+        self.blair_device = str(self.blair_device).strip().lower()
+        if self.blair_item_cap is not None and int(self.blair_item_cap) <= 0:
+            raise ValueError("blair_item_cap must be positive when set.")
         if self.min_free_disk_gb is not None and float(self.min_free_disk_gb) < 0:
             raise ValueError("min_free_disk_gb must be non-negative.")
 
@@ -379,6 +386,30 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "ranker_train_example_cap": 5_000,
             "ranker_val_example_cap": 1_000,
             "split_eval_example_cap": 2_000,
+        },
+        "medium-neural": {
+            "max_rows_per_category": 500_000,
+            "retriever_train_example_cap": 75_000,
+            "retriever_quality_min_history": 3,
+            "enable_neural_retriever": True,
+            "neural_retriever_variant": "blair_text",
+            "category_backfill_enabled": True,
+            "recency_cooccurrence_enabled": True,
+            "candidate_source_balance_enabled": True,
+            "vector_retriever_trigger_count": 5,
+            "eval_user_cap": 1_000,
+            "candidate_union_top_k": 500,
+            "candidate_union_batch_size": 500,
+            "cooccurrence_candidate_k": 200,
+            "latent_cf_candidate_k": 200,
+            "content_candidate_k": 200,
+            "neural_candidate_k": 200,
+            "popularity_backfill_k": 100,
+            "ranker_candidate_top_k": 150,
+            "ranker_train_example_cap": 5_000,
+            "ranker_val_example_cap": 500,
+            "split_eval_example_cap": 1_000,
+            "blair_item_cap": 250_000,
         },
         "quality-neural": {
             "max_rows_per_category": None,

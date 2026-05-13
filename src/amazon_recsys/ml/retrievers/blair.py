@@ -18,14 +18,16 @@ Production-safe scope:
 from __future__ import annotations
 
 import gc
+import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
 from amazon_recsys.ml import core
-from amazon_recsys.ml.io_utils import atomic_replace, open_atomic_memmap
+from amazon_recsys.ml.io_utils import atomic_write_json
 
 if TYPE_CHECKING:  # pragma: no cover
     from sentence_transformers import SentenceTransformer  # noqa: F401
@@ -34,7 +36,23 @@ if TYPE_CHECKING:  # pragma: no cover
 LOGGER = logging.getLogger(__name__)
 
 
-def _load_sentence_transformer(model_name: str, fallback_model: str, max_seq_length: int):
+def _resolve_device(device: str) -> str:
+    requested = str(device).strip().lower()
+    if requested == "cpu":
+        return "cpu"
+    try:
+        import torch
+    except ModuleNotFoundError:
+        if requested == "cuda":
+            raise RuntimeError("AMAZON_RECSYS_BLAIR_DEVICE=cuda was requested, but torch is not installed.")
+        return "cpu"
+    cuda_available = bool(torch.cuda.is_available())
+    if requested == "cuda" and not cuda_available:
+        raise RuntimeError("AMAZON_RECSYS_BLAIR_DEVICE=cuda was requested, but CUDA is not available.")
+    return "cuda" if cuda_available and requested in {"auto", "cuda"} else "cpu"
+
+
+def _load_sentence_transformer(model_name: str, fallback_model: str, max_seq_length: int, device: str = "auto"):
     try:
         from sentence_transformers import SentenceTransformer
     except ModuleNotFoundError as exc:
@@ -44,8 +62,9 @@ def _load_sentence_transformer(model_name: str, fallback_model: str, max_seq_len
             "(this pulls in torch + transformers as transitive dependencies)."
         ) from exc
 
+    resolved_device = _resolve_device(device)
     try:
-        encoder = SentenceTransformer(model_name)
+        encoder = SentenceTransformer(model_name, device=resolved_device)
         resolved_name = model_name
     except Exception as primary_error:  # noqa: BLE001 - any download/load failure triggers fallback
         LOGGER.warning(
@@ -54,10 +73,10 @@ def _load_sentence_transformer(model_name: str, fallback_model: str, max_seq_len
             primary_error,
             fallback_model,
         )
-        encoder = SentenceTransformer(fallback_model)
+        encoder = SentenceTransformer(fallback_model, device=resolved_device)
         resolved_name = fallback_model
     encoder.max_seq_length = int(max_seq_length)
-    return encoder, resolved_name
+    return encoder, resolved_name, resolved_device
 
 
 _RICH_METADATA_COLUMNS = (
@@ -148,6 +167,72 @@ def _project_and_normalize(embeddings: np.ndarray, projection: np.ndarray | None
     return core._normalize_rows(np.asarray(vectors, dtype=np.float32))
 
 
+def _load_embedding_state(
+    state_path: Path,
+    embedding_path: Path,
+    *,
+    item_count: int,
+    configured_model_name: str,
+    fallback_model_name: str,
+    max_seq_length: int,
+    projection_dim: int,
+    chunk_rows: int,
+    seed: int,
+    item_cap: int | None,
+) -> dict[str, object] | None:
+    if not state_path.exists() or not embedding_path.exists():
+        return None
+    try:
+        with open(state_path, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+        embeddings = np.load(embedding_path, mmap_mode="r")
+    except Exception as exc:  # noqa: BLE001 - invalid state should cause a clean rebuild
+        LOGGER.warning("BLAIR resume state could not be read (%s). Rebuilding embeddings.", exc)
+        return None
+    expected = {
+        "item_count": int(item_count),
+        "configured_model_name": str(configured_model_name),
+        "fallback_model_name": str(fallback_model_name),
+        "max_seq_length": int(max_seq_length),
+        "projection_dim": int(projection_dim),
+        "chunk_rows": int(chunk_rows),
+        "seed": int(seed),
+        "item_cap": int(item_cap) if item_cap is not None else None,
+    }
+    for key, expected_value in expected.items():
+        if state.get(key) != expected_value:
+            LOGGER.info(
+                "BLAIR resume state mismatch for %s: stored=%r expected=%r. Rebuilding embeddings.",
+                key,
+                state.get(key),
+                expected_value,
+            )
+            return None
+    if int(embeddings.shape[0]) != item_count:
+        LOGGER.info(
+            "BLAIR embedding shape mismatch: stored_rows=%s expected_rows=%s. Rebuilding embeddings.",
+            embeddings.shape[0],
+            item_count,
+        )
+        return None
+    embedding_dim = int(state.get("embedding_dim", embeddings.shape[1]))
+    if int(embeddings.shape[1]) != embedding_dim:
+        LOGGER.info(
+            "BLAIR embedding dimension mismatch: stored=%s expected=%s. Rebuilding embeddings.",
+            embeddings.shape[1],
+            embedding_dim,
+        )
+        return None
+    completed_rows = int(state.get("completed_rows", 0))
+    if completed_rows < 0 or completed_rows > item_count:
+        return None
+    return state
+
+
+def _write_embedding_state(state_path: Path, payload: dict[str, object]) -> None:
+    atomic_write_json(state_path, payload)
+
+
 def _load_rich_metadata(config: core.PipelineConfig, item_features: pd.DataFrame) -> pd.DataFrame | None:
     """Reload raw item metadata in-memory so BLAIR can encode the rich text fields.
 
@@ -182,107 +267,175 @@ def train_blair_retriever(
 ) -> core.RetrieverArtifacts:
     config = prepared.config
     item_features = prepared.item_features.sort_values("item_idx", kind="mergesort").reset_index(drop=True)
-    metadata = _load_rich_metadata(config, item_features)
-    metadata_index, rich_cols_present = _metadata_lookup(metadata)
-    item_text_columns = (
-        list(_RICH_METADATA_COLUMNS) if metadata_index is not None and not metadata_index.empty
-        else ["title", "source_category"]
-    )
-
-    encoder, resolved_model = _load_sentence_transformer(
-        config.blair_model_name,
-        config.blair_fallback_model,
-        config.blair_max_seq_length,
-    )
+    full_item_count = int(len(item_features))
+    if config.blair_item_cap is not None:
+        item_cap = min(int(config.blair_item_cap), full_item_count)
+        item_features = item_features.iloc[:item_cap].reset_index(drop=True)
+        LOGGER.warning(
+            "BLAIR item cap is active: encoding %s/%s catalog items. Use this for smoke/medium runs, not final prod acceptance.",
+            f"{item_cap:,}",
+            f"{full_item_count:,}",
+        )
     item_count = int(len(item_features))
     if item_count <= 0:
         raise ValueError("Cannot train BLAIR retriever with an empty item catalog.")
-    LOGGER.info(
-        "Encoding %d BLAIR item texts with %s (batch=%d, max_seq=%d chunk_rows=%d projection_dim=%d rich_metadata=%s)",
-        item_count,
-        resolved_model,
-        int(config.blair_batch_size),
-        int(config.blair_max_seq_length),
-        int(config.blair_chunk_rows),
-        int(config.blair_projection_dim),
-        bool(rich_cols_present),
-    )
-    text_source_counts = {"rich": 0, "fallback": 0}
-    embedding_path = config.model_dir / "blair_text_item_embeddings.npy"
-    item_embeddings_writer: np.memmap | None = None
-    temp_embedding_path = None
-    projection: np.ndarray | None = None
-    raw_embedding_dim: int | None = None
-    embedding_dim: int | None = None
-    chunk_rows = int(config.blair_chunk_rows)
-    try:
-        for start in range(0, item_count, chunk_rows):
-            end = min(start + chunk_rows, item_count)
-            texts, counts = _build_item_texts_from_lookup(item_features.iloc[start:end], metadata_index)
-            text_source_counts["rich"] += counts["rich"]
-            text_source_counts["fallback"] += counts["fallback"]
-            raw_embeddings = encoder.encode(
-                texts,
-                batch_size=int(config.blair_batch_size),
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
-            raw_embeddings = np.asarray(raw_embeddings, dtype=np.float32)
-            if raw_embeddings.shape[0] != len(texts):
-                raise ValueError(
-                    f"BLAIR encoder returned {raw_embeddings.shape[0]} rows for {len(texts)} input texts."
-                )
-            if item_embeddings_writer is None:
-                raw_embedding_dim = int(raw_embeddings.shape[1])
-                projection = _projection_matrix(raw_embedding_dim, int(config.blair_projection_dim), config.seed)
-                embedding_dim = int(projection.shape[1]) if projection is not None else raw_embedding_dim
-                item_embeddings_writer, temp_embedding_path = open_atomic_memmap(
-                    embedding_path,
-                    dtype=np.float32,
-                    shape=(item_count, embedding_dim),
-                )
-            projected = _project_and_normalize(raw_embeddings, projection)
-            item_embeddings_writer[start:end] = projected
-            item_embeddings_writer.flush()
-            LOGGER.info(
-                "BLAIR encoded chunk: rows=%s/%s raw_dim=%s embedding_dim=%s rich=%s fallback=%s",
-                f"{end:,}",
-                f"{item_count:,}",
-                raw_embedding_dim,
-                embedding_dim,
-                f"{text_source_counts['rich']:,}",
-                f"{text_source_counts['fallback']:,}",
-            )
-            del texts, raw_embeddings, projected
-            gc.collect()
-        if item_embeddings_writer is None or temp_embedding_path is None:
-            raise RuntimeError("BLAIR encoding produced no embeddings.")
-        item_embeddings_writer.flush()
-        mmap_handle = getattr(item_embeddings_writer, "_mmap", None)
-        if mmap_handle is not None:
-            mmap_handle.close()
-        del item_embeddings_writer
-        gc.collect()
-        atomic_replace(temp_embedding_path, embedding_path)
-    except Exception:
-        if temp_embedding_path is not None:
-            if temp_embedding_path.resolve() != embedding_path.resolve():
-                try:
-                    temp_embedding_path.unlink(missing_ok=True)
-                except PermissionError:
-                    pass
-        raise
 
-    item_embeddings = np.load(embedding_path, mmap_mode="r")
-    LOGGER.info(
-        "BLAIR item embeddings ready: path=%s shape=%s rich=%d fallback=%d columns=%s",
+    embedding_path = config.model_dir / "blair_text_item_embeddings.npy"
+    state_path = config.model_dir / "blair_text_item_embeddings_state.json"
+    chunk_rows = int(config.blair_chunk_rows)
+    state = _load_embedding_state(
+        state_path,
         embedding_path,
-        item_embeddings.shape,
-        text_source_counts["rich"],
-        text_source_counts["fallback"],
-        item_text_columns,
+        item_count=item_count,
+        configured_model_name=config.blair_model_name,
+        fallback_model_name=config.blair_fallback_model,
+        max_seq_length=int(config.blair_max_seq_length),
+        projection_dim=int(config.blair_projection_dim),
+        chunk_rows=chunk_rows,
+        seed=int(config.seed),
+        item_cap=int(config.blair_item_cap) if config.blair_item_cap is not None else None,
     )
+    text_source_counts = (
+        dict(state.get("item_text_source_counts", {"rich": 0, "fallback": 0}))
+        if state is not None else {"rich": 0, "fallback": 0}
+    )
+    raw_embedding_dim = int(state["raw_embedding_dim"]) if state and state.get("raw_embedding_dim") is not None else None
+    embedding_dim = int(state["embedding_dim"]) if state and state.get("embedding_dim") is not None else None
+    resolved_model = str(state.get("encoder_name")) if state and state.get("encoder_name") else ""
+    resolved_device = str(state.get("device")) if state and state.get("device") else str(config.blair_device)
+    item_text_columns = list(state.get("item_text_columns", [])) if state else []
+    completed_rows = int(state.get("completed_rows", 0)) if state else 0
+
+    if state is not None and bool(state.get("complete")) and completed_rows >= item_count:
+        item_embeddings = np.load(embedding_path, mmap_mode="r")
+        LOGGER.info(
+            "Reusing complete BLAIR embeddings: path=%s shape=%s encoder=%s device=%s",
+            embedding_path,
+            item_embeddings.shape,
+            resolved_model,
+            resolved_device,
+        )
+    else:
+        metadata = _load_rich_metadata(config, item_features)
+        metadata_index, rich_cols_present = _metadata_lookup(metadata)
+        item_text_columns = (
+            list(_RICH_METADATA_COLUMNS) if metadata_index is not None and not metadata_index.empty
+            else ["title", "source_category"]
+        )
+        encoder, resolved_model, resolved_device = _load_sentence_transformer(
+            config.blair_model_name,
+            config.blair_fallback_model,
+            config.blair_max_seq_length,
+            config.blair_device,
+        )
+        item_embeddings_writer: np.memmap | None = None
+        projection: np.ndarray | None = None
+        if completed_rows > 0:
+            LOGGER.info(
+                "Resuming BLAIR encoding from row %s/%s using %s",
+                f"{completed_rows:,}",
+                f"{item_count:,}",
+                embedding_path,
+            )
+            if raw_embedding_dim is None or embedding_dim is None:
+                raise RuntimeError("BLAIR resume state is missing embedding dimensions.")
+            item_embeddings_writer = np.lib.format.open_memmap(embedding_path, mode="r+")
+            projection = _projection_matrix(raw_embedding_dim, int(config.blair_projection_dim), config.seed)
+        LOGGER.info(
+            "Encoding %d BLAIR item texts with %s on %s (batch=%d, max_seq=%d chunk_rows=%d projection_dim=%d rich_metadata=%s)",
+            item_count,
+            resolved_model,
+            resolved_device,
+            int(config.blair_batch_size),
+            int(config.blair_max_seq_length),
+            chunk_rows,
+            int(config.blair_projection_dim),
+            bool(rich_cols_present),
+        )
+        try:
+            for start in range(completed_rows, item_count, chunk_rows):
+                end = min(start + chunk_rows, item_count)
+                texts, counts = _build_item_texts_from_lookup(item_features.iloc[start:end], metadata_index)
+                text_source_counts["rich"] = int(text_source_counts.get("rich", 0)) + counts["rich"]
+                text_source_counts["fallback"] = int(text_source_counts.get("fallback", 0)) + counts["fallback"]
+                raw_embeddings = encoder.encode(
+                    texts,
+                    batch_size=int(config.blair_batch_size),
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                raw_embeddings = np.asarray(raw_embeddings, dtype=np.float32)
+                if raw_embeddings.shape[0] != len(texts):
+                    raise ValueError(
+                        f"BLAIR encoder returned {raw_embeddings.shape[0]} rows for {len(texts)} input texts."
+                    )
+                if item_embeddings_writer is None:
+                    raw_embedding_dim = int(raw_embeddings.shape[1])
+                    projection = _projection_matrix(raw_embedding_dim, int(config.blair_projection_dim), config.seed)
+                    embedding_dim = int(projection.shape[1]) if projection is not None else raw_embedding_dim
+                    item_embeddings_writer = np.lib.format.open_memmap(
+                        embedding_path,
+                        mode="w+",
+                        dtype=np.float32,
+                        shape=(item_count, embedding_dim),
+                    )
+                projected = _project_and_normalize(raw_embeddings, projection)
+                item_embeddings_writer[start:end] = projected
+                item_embeddings_writer.flush()
+                _write_embedding_state(
+                    state_path,
+                    {
+                        "complete": end >= item_count,
+                        "completed_rows": int(end),
+                        "item_count": int(item_count),
+                        "full_item_count": int(full_item_count),
+                        "item_cap": int(config.blair_item_cap) if config.blair_item_cap is not None else None,
+                        "configured_model_name": config.blair_model_name,
+                        "fallback_model_name": config.blair_fallback_model,
+                        "encoder_name": resolved_model,
+                        "device": resolved_device,
+                        "max_seq_length": int(config.blair_max_seq_length),
+                        "projection_dim": int(config.blair_projection_dim),
+                        "raw_embedding_dim": int(raw_embedding_dim or 0),
+                        "embedding_dim": int(embedding_dim or 0),
+                        "chunk_rows": int(chunk_rows),
+                        "seed": int(config.seed),
+                        "item_text_columns": item_text_columns,
+                        "item_text_source_counts": text_source_counts,
+                    },
+                )
+                LOGGER.info(
+                    "BLAIR encoded chunk: rows=%s/%s raw_dim=%s embedding_dim=%s rich=%s fallback=%s",
+                    f"{end:,}",
+                    f"{item_count:,}",
+                    raw_embedding_dim,
+                    embedding_dim,
+                    f"{int(text_source_counts.get('rich', 0)):,}",
+                    f"{int(text_source_counts.get('fallback', 0)):,}",
+                )
+                del texts, raw_embeddings, projected
+                gc.collect()
+            if item_embeddings_writer is None:
+                raise RuntimeError("BLAIR encoding produced no embeddings.")
+            item_embeddings_writer.flush()
+            mmap_handle = getattr(item_embeddings_writer, "_mmap", None)
+            if mmap_handle is not None:
+                mmap_handle.close()
+            del item_embeddings_writer
+            gc.collect()
+        except Exception:
+            LOGGER.exception("BLAIR encoding failed. Completed chunks are resumable from %s when state is valid.", state_path)
+            raise
+        item_embeddings = np.load(embedding_path, mmap_mode="r")
+        LOGGER.info(
+            "BLAIR item embeddings ready: path=%s shape=%s rich=%d fallback=%d columns=%s",
+            embedding_path,
+            item_embeddings.shape,
+            int(text_source_counts.get("rich", 0)),
+            int(text_source_counts.get("fallback", 0)),
+            item_text_columns,
+        )
 
     ann_index_path = core.build_ann_index(
         config,
@@ -314,6 +467,10 @@ def train_blair_retriever(
             "ann_trees": int(config.blair_ann_trees),
             "batch_size": int(config.blair_batch_size),
             "max_seq_length": int(config.blair_max_seq_length),
+            "device": resolved_device,
+            "item_cap": int(config.blair_item_cap) if config.blair_item_cap is not None else None,
+            "encoded_item_count": int(item_count),
+            "full_item_count": int(full_item_count),
             "serving_query": "history_item_embedding_mean",
             "item_text_columns": item_text_columns,
             "item_text_source_counts": text_source_counts,

@@ -125,16 +125,38 @@ Use `train` when you only want metrics and cached model artifacts. Use `evaluate
 
 ### Run Profiles
 
-`AMAZON_RECSYS_RUN_PROFILE` and `--run-profile` accept four values:
+`AMAZON_RECSYS_RUN_PROFILE` and `--run-profile` accept five values:
 
 | Profile | Best for | Data and compute behavior |
 | --- | --- | --- |
 | `debug` | Local smoke tests and quick iteration | Reads up to `100000` review rows per category, disables the neural retriever, caps retriever training at `40000` examples, caps ranker training at `2000` examples, and evaluates up to `1000` users. |
+| `medium-neural` | Medium BLAIR experiments before full prod | Reads up to `500000` review rows per category, enables `blair_text`, caps BLAIR encoding at `250000` catalog items, caps ranker training at `5000` examples, and evaluates up to `1000` users. This is for directional signal, not final activation. |
 | `quality` | Stronger offline experiments on CPU | Uses the full configured review files, disables the neural retriever by default, caps retriever training at `100000` examples, caps ranker training at `5000` examples, and evaluates up to `2000` users. |
-| `quality-neural` | Optional neural retrieval experiment | Uses the quality-sized data and caps, but enables the TensorFlow two-tower retriever for candidate-recovery experiments. |
+| `quality-neural` | Full-catalog BLAIR candidate-recovery experiment | Uses the full configured review files, enables `blair_text`, keeps XGBoost ranker settings unchanged, and runs full BLAIR item encoding unless you explicitly set `AMAZON_RECSYS_BLAIR_ITEM_CAP`. |
 | `full` | Heavier production-style experiments | Uses the full configured review files, enables the neural retriever, removes the retriever training cap, caps ranker training at `50000` examples, and removes the evaluation user cap. |
 
-Profile defaults are applied only when the corresponding internal `PipelineConfig` value is still at its package default. Settings exposed through `.env`, such as ranker caps and candidate sizes, can still override many of the runtime limits.
+Profile defaults are applied first for profile-controlled settings, then meaningful shell or `.env` overrides are applied. Values equal to the base template defaults are treated as defaults so a copied `.env` does not accidentally suppress profile settings.
+
+### BLAIR Controls
+
+`blair_text` is the current neural retrieval path for candidate recovery. It encodes item text once and serves retrieval through the same portable vector-retriever slot used by the older two-tower source.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `AMAZON_RECSYS_NEURAL_RETRIEVER_VARIANT` | `blair_text` for neural profiles | Selects the neural retriever variant. |
+| `AMAZON_RECSYS_BLAIR_DEVICE` | `auto` | `auto` uses CUDA when available, otherwise CPU. Use `cuda` to fail fast when no GPU is available, or `cpu` to force CPU. |
+| `AMAZON_RECSYS_BLAIR_PROJECTION_DIM` | `256` | Projects raw BLAIR embeddings down before ANN indexing. |
+| `AMAZON_RECSYS_BLAIR_CHUNK_ROWS` | `25000` | Number of catalog items encoded per chunk. Smaller chunks reduce peak memory, larger chunks reduce overhead. |
+| `AMAZON_RECSYS_BLAIR_ITEM_CAP` | empty | Optional cap for BLAIR catalog encoding. Use only for smoke/medium runs because capped catalogs cannot prove final prod recall. |
+
+BLAIR encoding is resumable. Progress is saved beside the embedding file:
+
+```text
+notebooks/artifacts/amazon_recsys/<run-name>/models/blair_text_item_embeddings.npy
+notebooks/artifacts/amazon_recsys/<run-name>/models/blair_text_item_embeddings_state.json
+```
+
+If a run stops during BLAIR encoding, rerun the same command with the same run name and compatible BLAIR settings. The next run resumes from the last completed chunk. If the state says encoding is complete, the encoder step is skipped and the pipeline continues with ANN building, metrics, ranker training, and export.
 
 ### Data Files
 
@@ -216,7 +238,7 @@ $env:AMAZON_RECSYS_RANKER_VAL_EXAMPLE_CAP="250"
 python -m amazon_recsys.cli.main export-bundle --run-name beauty-small --run-profile debug --activate
 ```
 
-Medium multi-category experiment:
+Medium non-neural multi-category experiment:
 
 ```powershell
 $env:AMAZON_RECSYS_CATEGORIES='["All_Beauty","Automotive","Industrial_and_Scientific"]'
@@ -230,7 +252,36 @@ $env:AMAZON_RECSYS_EVAL_USER_CAP="2000"
 python -m amazon_recsys.cli.main export-bundle --run-name quality-local --run-profile quality --activate
 ```
 
-Heavy production-style experiment:
+Medium BLAIR experiment:
+
+```powershell
+$env:AMAZON_RECSYS_CATEGORIES='["All_Beauty","Automotive","Industrial_and_Scientific"]'
+$env:AMAZON_RECSYS_ENABLE_NEURAL_RETRIEVER="true"
+$env:AMAZON_RECSYS_NEURAL_RETRIEVER_VARIANT="blair_text"
+$env:AMAZON_RECSYS_BLAIR_DEVICE="auto"
+$env:AMAZON_RECSYS_GATE_PROFILE="off"
+$env:AMAZON_RECSYS_ARTIFACT_WRITE_MODE="direct"
+python -m amazon_recsys.cli.main export-bundle --run-name medium-2026-05-13-blair-v1 --run-profile medium-neural --version medium-2026-05-13-blair-v1
+```
+
+Use this to check whether BLAIR contributes recovery before paying for a full-catalog run. Do not activate this bundle as production quality unless you intentionally accept the capped BLAIR catalog.
+
+Full BLAIR production-candidate experiment:
+
+```powershell
+$env:AMAZON_RECSYS_CATEGORIES='["All_Beauty","Automotive","Industrial_and_Scientific"]'
+$env:AMAZON_RECSYS_ENABLE_NEURAL_RETRIEVER="true"
+$env:AMAZON_RECSYS_NEURAL_RETRIEVER_VARIANT="blair_text"
+$env:AMAZON_RECSYS_BLAIR_DEVICE="auto"
+$env:AMAZON_RECSYS_BLAIR_ITEM_CAP=""
+$env:AMAZON_RECSYS_GATE_PROFILE="recovery-v1"
+$env:AMAZON_RECSYS_ARTIFACT_WRITE_MODE="direct"
+python -m amazon_recsys.cli.main export-bundle --run-name prod-2026-05-13-blair-v2 --run-profile quality-neural --version prod-2026-05-13-blair-v2
+```
+
+Do not activate until the BLAIR retriever metrics, candidate recall diagnostics, and final ranker metrics beat the previous active bundle.
+
+Heavy production-style non-BLAIR experiment:
 
 ```powershell
 $env:AMAZON_RECSYS_CATEGORIES='["All_Beauty","Automotive","Industrial_and_Scientific"]'

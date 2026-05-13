@@ -658,6 +658,28 @@ def test_quality_neural_profile_applies_scale_defaults_when_not_explicit(workspa
 
 
 @pytest.mark.retrieval
+def test_medium_neural_profile_applies_blair_smaller_defaults(workspace_dir: Path) -> None:
+    settings = AppSettings(
+        workspace_root=workspace_dir,
+        data_dir=Path("amazon_review_data"),
+        run_name="medium-pytest-blair-v1",
+        run_profile="medium-neural",
+        metadata_download_if_missing=False,
+    )
+
+    config = pipeline_config_from_settings(settings)
+
+    assert config.enable_neural_retriever is True
+    assert config.neural_retriever_variant == "blair_text"
+    assert config.max_rows_per_category == 500_000
+    assert config.blair_item_cap == 250_000
+    assert config.eval_user_cap == 1_000
+    assert config.ranker_train_example_cap == 5_000
+    assert config.candidate_union_top_k == 500
+    assert config.ranker_candidate_top_k == 150
+
+
+@pytest.mark.retrieval
 def test_train_retrievers_uses_configured_neural_variant(monkeypatch) -> None:
     config = SimpleNamespace(enable_neural_retriever=True, neural_retriever_variant="dat_lite")
     prepared = SimpleNamespace(config=config)
