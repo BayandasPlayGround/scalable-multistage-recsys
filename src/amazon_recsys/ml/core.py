@@ -20,7 +20,9 @@ import tensorflow as tf
 from annoy import AnnoyIndex
 from scipy import sparse
 from sklearn.decomposition import TruncatedSVD
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer, TfidfVectorizer
+
+from amazon_recsys.ml.io_utils import atomic_save_npy, atomic_write_json, atomic_write_parquet
 
 try:
     import xgboost as xgb
@@ -95,9 +97,19 @@ class PipelineConfig:
     retriever_logit_scale: float = 8.0
     persist_encoder_models: bool = False
     enable_neural_retriever: bool = False
+    neural_retriever_variant: str = "two_tower"
     in_batch_weight: float = 0.15
     dat_mimic_weight: float = 0.10
     dat_category_alignment_weight: float = 0.05
+    blair_model_name: str = "hyp1231/blair-roberta-base"
+    blair_fallback_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    blair_batch_size: int = 64
+    blair_max_seq_length: int = 256
+    blair_projection_dim: int = 256
+    blair_ann_trees: int = 10
+    blair_chunk_rows: int = 25_000
+    blair_device: str = "auto"
+    blair_item_cap: int | None = None
     ann_trees: int = 50
     retrieval_top_k: int = 100
     eval_user_cap: int | None = 1_000
@@ -108,11 +120,18 @@ class PipelineConfig:
     popularity_backfill_k: int = 50
     category_backfill_enabled: bool = True
     recency_cooccurrence_enabled: bool = True
+    candidate_source_balance_enabled: bool = True
+    vector_retriever_trigger_count: int = 5
     candidate_union_top_k: int = 300
     ranker_candidate_top_k: int = 200
     ranker_train_example_cap: int = 2_000
     ranker_val_example_cap: int | None = 1_000
     ranker_negatives_per_positive: int = 10
+    # Comma-separated weights for ranker negative sampling, in the order
+    # ``popularity,cooccurrence,random``. The default ``"0,0,1.0"`` reproduces the legacy
+    # uniform-random behaviour exactly. Set to e.g. ``"0.6,0.3,0.1"`` to bias negatives toward
+    # popularity-weighted + cooccurrence-hard samples, which is the recommended Phase-D mix.
+    ranker_hardneg_mix: str = "0,0,1.0"
     ranker_batch_size: int = 512
     ranker_epochs: int = 3
     candidate_union_batch_size: int = 500
@@ -129,12 +148,13 @@ class PipelineConfig:
     training_verbose: int = 2
     tf_prefetch_batches: int = 1
     memory_map_item_text: bool = True
+    min_free_disk_gb: float | None = None
 
     def __post_init__(self) -> None:
         self.base_dir = Path(self.base_dir)
         if not 0 < float(self.dev_fraction) <= 1:
             raise ValueError("dev_fraction must be in the interval (0, 1].")
-        valid_run_profiles = {"debug", "quality", "quality-neural", "full"}
+        valid_run_profiles = {"debug", "medium-neural", "quality", "quality-neural", "full"}
         if self.run_profile not in valid_run_profiles:
             raise ValueError(f"run_profile must be one of {sorted(valid_run_profiles)}.")
         valid_sampling_strategies = {"user", "stratified_user", "category_balanced_user"}
@@ -146,14 +166,33 @@ class PipelineConfig:
         valid_ranker_backends = {"xgboost", "dlrm"}
         if self.ranker_backend not in valid_ranker_backends:
             raise ValueError(f"ranker_backend must be one of {sorted(valid_ranker_backends)}.")
+        valid_neural_variants = {"two_tower", "dat_lite", "blair_text"}
+        if self.neural_retriever_variant not in valid_neural_variants:
+            raise ValueError(f"neural_retriever_variant must be one of {sorted(valid_neural_variants)}.")
         if float(self.dev_hard_negative_multiplier) <= 0 or float(self.dev_neutral_multiplier) <= 0:
             raise ValueError("Dev sampling multipliers must be positive.")
+        _parse_hardneg_mix(self.ranker_hardneg_mix)  # raises early on malformed config
         if int(self.retriever_validation_negatives_per_positive) <= 0:
             raise ValueError("retriever_validation_negatives_per_positive must be positive.")
         if int(self.retriever_quality_min_history) < 1:
             raise ValueError("retriever_quality_min_history must be at least 1.")
         if float(self.retriever_logit_scale) <= 0:
             raise ValueError("retriever_logit_scale must be positive.")
+        if float(self.dat_mimic_weight) < 0 or float(self.dat_category_alignment_weight) < 0:
+            raise ValueError("DAT loss weights must be non-negative.")
+        if int(self.blair_projection_dim) < 0:
+            raise ValueError("blair_projection_dim must be zero or positive.")
+        if int(self.blair_ann_trees) <= 0:
+            raise ValueError("blair_ann_trees must be positive.")
+        if int(self.blair_chunk_rows) <= 0:
+            raise ValueError("blair_chunk_rows must be positive.")
+        if str(self.blair_device).strip().lower() not in {"auto", "cpu", "cuda"}:
+            raise ValueError("blair_device must be one of: auto, cpu, cuda.")
+        self.blair_device = str(self.blair_device).strip().lower()
+        if self.blair_item_cap is not None and int(self.blair_item_cap) <= 0:
+            raise ValueError("blair_item_cap must be positive when set.")
+        if self.min_free_disk_gb is not None and float(self.min_free_disk_gb) < 0:
+            raise ValueError("min_free_disk_gb must be non-negative.")
 
     @property
     def data_dir(self) -> Path:
@@ -317,6 +356,8 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "enable_neural_retriever": False,
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
+            "candidate_source_balance_enabled": True,
+            "vector_retriever_trigger_count": 5,
             "eval_user_cap": 1_000,
             "candidate_union_top_k": 200,
             "candidate_union_batch_size": 300,
@@ -332,26 +373,64 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "enable_neural_retriever": False,
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
+            "candidate_source_balance_enabled": True,
+            "vector_retriever_trigger_count": 5,
             "eval_user_cap": 2_000,
-            "candidate_union_top_k": 200,
+            "candidate_union_top_k": 500,
             "candidate_union_batch_size": 500,
-            "ranker_candidate_top_k": 100,
+            "cooccurrence_candidate_k": 250,
+            "latent_cf_candidate_k": 250,
+            "content_candidate_k": 250,
+            "popularity_backfill_k": 100,
+            "ranker_candidate_top_k": 200,
             "ranker_train_example_cap": 5_000,
             "ranker_val_example_cap": 1_000,
             "split_eval_example_cap": 2_000,
+        },
+        "medium-neural": {
+            "max_rows_per_category": 500_000,
+            "retriever_train_example_cap": 75_000,
+            "retriever_quality_min_history": 3,
+            "enable_neural_retriever": True,
+            "neural_retriever_variant": "blair_text",
+            "category_backfill_enabled": True,
+            "recency_cooccurrence_enabled": True,
+            "candidate_source_balance_enabled": True,
+            "vector_retriever_trigger_count": 5,
+            "eval_user_cap": 1_000,
+            "candidate_union_top_k": 500,
+            "candidate_union_batch_size": 500,
+            "cooccurrence_candidate_k": 200,
+            "latent_cf_candidate_k": 200,
+            "content_candidate_k": 200,
+            "neural_candidate_k": 200,
+            "popularity_backfill_k": 100,
+            "ranker_candidate_top_k": 150,
+            "ranker_train_example_cap": 5_000,
+            "ranker_val_example_cap": 500,
+            "split_eval_example_cap": 1_000,
+            "blair_item_cap": 250_000,
         },
         "quality-neural": {
             "max_rows_per_category": None,
             "retriever_train_example_cap": 100_000,
             "retriever_quality_min_history": 3,
             "enable_neural_retriever": True,
+            "neural_retriever_variant": "blair_text",
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
+            "candidate_source_balance_enabled": True,
+            "vector_retriever_trigger_count": 5,
             "eval_user_cap": 2_000,
-            "candidate_union_top_k": 200,
+            "candidate_union_top_k": 650,
             "candidate_union_batch_size": 500,
-            "ranker_candidate_top_k": 100,
-            "ranker_train_example_cap": 5_000,
+            "cooccurrence_candidate_k": 250,
+            "latent_cf_candidate_k": 250,
+            "content_candidate_k": 250,
+            "neural_candidate_k": 250,
+            "popularity_backfill_k": 100,
+            "ranker_candidate_top_k": 250,
+            "ranker_train_example_cap": 10_000,
             "ranker_val_example_cap": 1_000,
             "split_eval_example_cap": 2_000,
         },
@@ -360,12 +439,20 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "retriever_train_example_cap": None,
             "retriever_quality_min_history": 3,
             "enable_neural_retriever": True,
+            "neural_retriever_variant": "blair_text",
             "category_backfill_enabled": True,
             "recency_cooccurrence_enabled": True,
+            "candidate_source_balance_enabled": True,
+            "vector_retriever_trigger_count": 5,
             "eval_user_cap": None,
-            "candidate_union_top_k": 300,
+            "candidate_union_top_k": 650,
             "candidate_union_batch_size": 1_000,
-            "ranker_candidate_top_k": 200,
+            "cooccurrence_candidate_k": 250,
+            "latent_cf_candidate_k": 250,
+            "content_candidate_k": 250,
+            "neural_candidate_k": 250,
+            "popularity_backfill_k": 100,
+            "ranker_candidate_top_k": 250,
             "ranker_train_example_cap": 50_000,
             "ranker_val_example_cap": 5_000,
             "split_eval_example_cap": None,
@@ -541,8 +628,7 @@ def _load_raw_category_row_counts(config: PipelineConfig, force: bool = False) -
             raise FileNotFoundError(f"Review file not found: {source_path}")
         counts[category] = _count_jsonl_rows(source_path, max_rows=config.max_rows_per_category)
         category_bar.set_postfix(rows=counts[category])
-    with open(counts_path, "w", encoding="utf-8") as handle:
-        json.dump(counts, handle, indent=2)
+    atomic_write_json(counts_path, counts)
     return counts
 
 
@@ -773,7 +859,7 @@ def load_metadata(
 
 def _flush_records_to_parquet(records: list[Record], output_path: Path) -> None:
     if records:
-        pd.DataFrame(records).to_parquet(output_path, index=False)
+        atomic_write_parquet(output_path, pd.DataFrame(records), index=False)
 
 
 def _extract_review_signals(config: PipelineConfig, force: bool = False) -> tuple[pd.DataFrame, Path, Path]:
@@ -998,8 +1084,8 @@ def _compute_k_core_sets(config: PipelineConfig, positive_dir: Path, force: bool
     if valid_users is None or valid_items is None:
         raise RuntimeError("Failed to compute k-core sets")
     pd.DataFrame(iteration_rows).to_csv(kcore_stats_path, index=False)
-    pd.DataFrame({"user_id": sorted(valid_users)}).to_parquet(valid_users_path, index=False)
-    pd.DataFrame({"parent_asin": sorted(valid_items)}).to_parquet(valid_items_path, index=False)
+    atomic_write_parquet(valid_users_path, pd.DataFrame({"user_id": sorted(valid_users)}), index=False)
+    atomic_write_parquet(valid_items_path, pd.DataFrame({"parent_asin": sorted(valid_items)}), index=False)
     LOGGER.info("k-core complete: users=%s items=%s", f"{len(valid_users):,}", f"{len(valid_items):,}")
     return pd.DataFrame(iteration_rows), valid_users, valid_items
 
@@ -1054,19 +1140,26 @@ def _load_filtered_interactions(
 
 def _fit_text_features(config: PipelineConfig, item_table: pd.DataFrame) -> tuple[TfidfVectorizer, TruncatedSVD, np.ndarray]:
     texts = item_table["item_text"].fillna("").tolist()
-    vectorizer = TfidfVectorizer(max_features=config.text_max_features, ngram_range=(1, 2), min_df=2)
+    # Use unigrams only and a slightly higher min_df: bigrams on a 1.24M-doc fit roughly double
+    # the per-doc index-list peak that drove a MemoryError inside sklearn's _count_vocab on
+    # tight-RAM machines. Defaults stay configurable via text_max_features.
+    vectorizer = TfidfVectorizer(max_features=config.text_max_features, ngram_range=(1, 1), min_df=5)
     LOGGER.info(
         "Fitting text features: items=%s max_features=%s svd_dim=%s",
         f"{len(item_table):,}",
         config.text_max_features,
         config.text_svd_dim,
     )
+    gc.collect()  # release pandas-side intermediates before the heavy sparse build
     try:
         tfidf = vectorizer.fit_transform(texts)
     except ValueError:
         text_matrix = np.zeros((len(item_table), config.text_svd_dim), dtype=np.float32)
         svd = TruncatedSVD(n_components=1, random_state=config.seed)
         return vectorizer, svd, text_matrix
+    finally:
+        del texts  # release the 1.24M-element python list as soon as the sparse matrix is built
+        gc.collect()
     target_dim = min(config.text_svd_dim, max(2, tfidf.shape[1] - 1)) if tfidf.shape[1] > 2 else min(tfidf.shape[1], 2)
     if tfidf.shape[1] <= 1 or tfidf.shape[0] <= 2:
         text_matrix = np.zeros((len(item_table), config.text_svd_dim), dtype=np.float32)
@@ -1206,10 +1299,10 @@ def prepare_corpus(
                 "No interactions survived preprocessing. If dev_mode is enabled, increase dev_fraction or lower k_core. "
                 "If dev_mode is disabled, inspect the raw review files and metadata coverage."
             )
-        interactions.to_parquet(interactions_path, index=False)
-        hard_negatives.to_parquet(hard_negatives_path, index=False)
-        item_features.to_parquet(item_features_path, index=False)
-        np.save(item_text_path, item_text_matrix)
+        atomic_write_parquet(interactions_path, interactions, index=False)
+        atomic_write_parquet(hard_negatives_path, hard_negatives, index=False)
+        atomic_write_parquet(item_features_path, item_features, index=False)
+        atomic_save_npy(item_text_path, item_text_matrix)
         with open(vectorizer_path, "wb") as handle:
             pickle.dump(vectorizer, handle)
         with open(svd_path, "wb") as handle:
@@ -1256,9 +1349,29 @@ def prepare_corpus(
     )
 
 
-def _sample_training_examples(df: pd.DataFrame, cap: int, seed: int) -> pd.DataFrame:
+def _sample_training_examples(df: pd.DataFrame, cap: int, seed: int, *, category_balanced: bool = False) -> pd.DataFrame:
     if len(df) <= cap:
         return df.reset_index(drop=True)
+    if category_balanced:
+        sampled_parts: list[pd.DataFrame] = []
+        rng = np.random.default_rng(seed)
+        grouped = list(df.groupby("target_source_category", group_keys=False))
+        quota_base, remainder = divmod(cap, max(len(grouped), 1))
+        for category_index, (_, group) in enumerate(grouped):
+            desired = quota_base + (1 if category_index < remainder else 0)
+            if desired <= 0:
+                continue
+            sampled_parts.append(group.sample(n=min(desired, len(group)), random_state=int(rng.integers(0, 1_000_000))))
+        sampled = pd.concat(sampled_parts, ignore_index=True) if sampled_parts else df.iloc[0:0].copy()
+        if len(sampled) < cap:
+            sampled_ids = set(sampled["example_id"])
+            remainder_frame = df[~df["example_id"].isin(sampled_ids)]
+            if not remainder_frame.empty:
+                extra = remainder_frame.sample(n=min(cap - len(sampled), len(remainder_frame)), random_state=seed)
+                sampled = pd.concat([sampled, extra], ignore_index=True)
+        if len(sampled) > cap:
+            sampled = sampled.sample(n=cap, random_state=seed)
+        return sampled.reset_index(drop=True)
     sampled_parts: list[pd.DataFrame] = []
     target_month = (
         pd.to_datetime(df["target_timestamp"], utc=True, errors="coerce")
@@ -2214,12 +2327,14 @@ def build_ann_index(
     config: PipelineConfig,
     item_embeddings: np.ndarray,
     output_path: Path,
+    *,
+    ann_trees: int | None = None,
 ) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     index = AnnoyIndex(item_embeddings.shape[1], "angular")
     for row_index, embedding in enumerate(item_embeddings):
         index.add_item(row_index, embedding.tolist())
-    index.build(config.ann_trees)
+    index.build(int(ann_trees or config.ann_trees))
     index.save(str(output_path))
     return output_path
 
@@ -2361,10 +2476,67 @@ def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
     return matrix / norms
 
 
-def _ann_candidates_from_vectors(
+def _recent_unique_history_items(history_item_idxs: object, limit: int) -> list[int]:
+    if limit <= 0:
+        return []
+    history = _normalize_history_item_idxs(history_item_idxs)
+    selected: list[int] = []
+    seen: set[int] = set()
+    for item_idx in reversed(history):
+        if item_idx in seen:
+            continue
+        seen.add(item_idx)
+        selected.append(int(item_idx))
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _mean_embedding_profile(history_item_idxs: object, item_embeddings: np.ndarray) -> np.ndarray:
+    history = [item_idx for item_idx in _normalize_history_item_idxs(history_item_idxs) if 0 < item_idx <= len(item_embeddings)]
+    if not history:
+        return np.zeros((item_embeddings.shape[1],), dtype=np.float32)
+    return np.mean(item_embeddings[np.asarray(history, dtype=np.int32) - 1], axis=0).astype(np.float32)
+
+
+def _weighted_vector_query_specs(
+    prepared: PreparedArtifacts,
+    retriever: RetrieverArtifacts,
+    example: pd.Series,
+) -> list[tuple[np.ndarray, float]]:
+    specs: list[tuple[np.ndarray, float]] = []
+    trigger_limit = max(int(prepared.config.vector_retriever_trigger_count), 0)
+    history = _normalize_history_item_idxs(example["history_item_idxs"])
+    if retriever.variant == "latent_cf":
+        user_vectors = np.asarray(retriever.metadata.get("user_vectors"), dtype=np.float32)
+        user_idx = int(example.get("user_idx", 0))
+        if 0 < user_idx <= len(user_vectors):
+            specs.append((user_vectors[user_idx - 1].astype(np.float32, copy=False), 1.0))
+    trigger_weights = (1.0, 0.9, 0.8, 0.7, 0.6)
+    for trigger_position, item_idx in enumerate(_recent_unique_history_items(history, trigger_limit)):
+        if not 0 < item_idx <= len(retriever.item_embeddings):
+            continue
+        weight = trigger_weights[trigger_position] if trigger_position < len(trigger_weights) else max(0.5, 1.0 - 0.1 * trigger_position)
+        specs.append((retriever.item_embeddings[item_idx - 1].astype(np.float32, copy=False), float(weight)))
+    if history:
+        if retriever.variant == "content_based":
+            mean_vector = _mean_text_profile(history, prepared.item_text_matrix)
+        else:
+            mean_vector = _mean_embedding_profile(history, retriever.item_embeddings)
+        specs.append((mean_vector.astype(np.float32, copy=False), 0.75))
+    normalized_specs: list[tuple[np.ndarray, float]] = []
+    for vector, weight in specs:
+        vector = _normalize_rows(vector)[0].astype(np.float32, copy=False)
+        if not np.any(vector):
+            continue
+        normalized_specs.append((vector, float(weight)))
+    return normalized_specs
+
+
+def _ann_candidates_from_query_specs(
     item_embeddings: np.ndarray,
     ann_index: AnnoyIndex,
-    query_vectors: np.ndarray,
+    query_specs_by_example: list[list[tuple[np.ndarray, float]]],
     examples: pd.DataFrame,
     split_artifacts: SplitArtifacts,
     top_k: int,
@@ -2378,7 +2550,7 @@ def _ann_candidates_from_vectors(
         "test": split_artifacts.test_seen_map,
     }
     for row_index, (_, example) in enumerate(examples.iterrows()):
-        query_vector = np.asarray(query_vectors[row_index], dtype=np.float32)
+        query_specs = query_specs_by_example[row_index] if row_index < len(query_specs_by_example) else []
         split_name = str(example["split"])
         example_history = _normalize_history_item_idxs(example["history_item_idxs"])
         if split_name == "train":
@@ -2387,26 +2559,26 @@ def _ann_candidates_from_vectors(
             seen_items = seen_maps[split_name].get(str(example["user_id"]), set(example_history))
         else:
             seen_items = set(example_history)
-        requested = max(top_k * 3, 300)
-        candidate_rows: list[tuple[int, float]] = []
-        while len(candidate_rows) < top_k and requested <= len(item_embeddings) * 2:
-            indices, distances = ann_index.get_nns_by_vector(query_vector.tolist(), requested, include_distances=True)
-            candidate_rows.clear()
-            for annoy_row, distance in zip(indices, distances):
-                item_idx = int(annoy_row + 1)
-                if item_idx in seen_items:
-                    continue
-                cosine_like_score = 1.0 - (distance ** 2) / 2.0
-                candidate_rows.append((item_idx, cosine_like_score))
-                if len(candidate_rows) >= top_k:
-                    break
+        candidate_scores: dict[int, float] = {}
+        request_cap = len(item_embeddings)
+        requested = min(max(top_k, 100), request_cap)
+        while query_specs and len(candidate_scores) < top_k and requested <= request_cap:
+            for query_vector, query_weight in query_specs:
+                indices, distances = ann_index.get_nns_by_vector(query_vector.tolist(), requested, include_distances=True)
+                for annoy_row, distance in zip(indices, distances):
+                    item_idx = int(annoy_row + 1)
+                    if item_idx in seen_items:
+                        continue
+                    cosine_like_score = 1.0 - (distance ** 2) / 2.0
+                    weighted_score = float(cosine_like_score) * float(query_weight)
+                    if weighted_score > candidate_scores.get(item_idx, -np.inf):
+                        candidate_scores[item_idx] = weighted_score
             requested *= 2
         target_item_idx = int(example["target_item_idx"])
-        retrieved_items = {item_idx for item_idx, _ in candidate_rows}
-        if inject_target_if_missing and split_name != "inference" and target_item_idx not in retrieved_items:
-            target_score = float(np.dot(query_vector, item_embeddings[target_item_idx - 1]))
-            candidate_rows.append((target_item_idx, target_score))
-        candidate_rows = sorted(candidate_rows, key=lambda value: value[1], reverse=True)[:top_k]
+        if inject_target_if_missing and split_name != "inference" and target_item_idx not in candidate_scores and query_specs:
+            target_vector = item_embeddings[target_item_idx - 1]
+            candidate_scores[target_item_idx] = max(float(np.dot(query_vector, target_vector)) * query_weight for query_vector, query_weight in query_specs)
+        candidate_rows = sorted(candidate_scores.items(), key=lambda value: value[1], reverse=True)[:top_k]
         for rank, (item_idx, score) in enumerate(candidate_rows, start=1):
             rows.append(
                 {
@@ -2434,6 +2606,29 @@ def _ann_candidates_from_vectors(
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _ann_candidates_from_vectors(
+    item_embeddings: np.ndarray,
+    ann_index: AnnoyIndex,
+    query_vectors: np.ndarray,
+    examples: pd.DataFrame,
+    split_artifacts: SplitArtifacts,
+    top_k: int,
+    source_name: str,
+    inject_target_if_missing: bool = True,
+) -> pd.DataFrame:
+    query_specs_by_example = [[(_normalize_rows(np.asarray(query_vector, dtype=np.float32))[0], 1.0)] for query_vector in query_vectors]
+    return _ann_candidates_from_query_specs(
+        item_embeddings,
+        ann_index,
+        query_specs_by_example,
+        examples,
+        split_artifacts,
+        top_k,
+        source_name,
+        inject_target_if_missing=inject_target_if_missing,
+    )
 
 
 def train_content_retriever(prepared: PreparedArtifacts, split_artifacts: SplitArtifacts) -> RetrieverArtifacts:
@@ -2494,9 +2689,10 @@ def train_latent_cf_retriever(prepared: PreparedArtifacts, split_artifacts: Spli
         ),
         shape=(len(split_artifacts.user_id_to_idx), len(prepared.item_features)),
     ).tocsr()
+    weighted_matrix = TfidfTransformer(norm=None, use_idf=True, smooth_idf=True, sublinear_tf=True).fit_transform(matrix)
     component_cap = min(prepared.config.latent_cf_components, max(2, min(matrix.shape) - 1))
     svd = TruncatedSVD(n_components=component_cap, random_state=prepared.config.seed)
-    user_vectors = svd.fit_transform(matrix).astype(np.float32)
+    user_vectors = svd.fit_transform(weighted_matrix).astype(np.float32)
     item_vectors = svd.components_.T.astype(np.float32)
     user_vectors = _normalize_rows(user_vectors)
     item_vectors = _normalize_rows(item_vectors)
@@ -2511,7 +2707,7 @@ def train_latent_cf_retriever(prepared: PreparedArtifacts, split_artifacts: Spli
         ann_index_path=ann_index_path,
         ann_index=_load_ann_index(item_vectors.shape[1], ann_index_path),
         metrics=pd.DataFrame(),
-        history={"explained_variance": [float(svd.explained_variance_ratio_.sum())]},
+        history={"explained_variance": [float(svd.explained_variance_ratio_.sum())], "implicit_weighting": "tfidf_sublinear"},
         retriever_kind="vector",
         metadata={"user_vectors": user_vectors},
     )
@@ -2563,7 +2759,7 @@ def _vector_retriever_queries(
                     vector = np.zeros((retriever.item_embeddings.shape[1],), dtype=np.float32)
             query_vectors.append(vector.astype(np.float32, copy=False))
         return _normalize_rows(np.stack(query_vectors).astype(np.float32))
-    if retriever.variant in {"two_tower", "dat_lite"}:
+    if retriever.variant in {"two_tower", "dat_lite", "blair_text"}:
         query_vectors = []
         for row in examples.itertuples(index=False):
             history = _normalize_history_item_idxs(getattr(row, "history_item_idxs"))
@@ -2590,11 +2786,14 @@ def generate_candidates(
             if retriever.ann_index_path is None:
                 raise ValueError(f"Retriever {retriever.variant} is missing its ANN index.")
             retriever.ann_index = _load_ann_index(retriever.item_embeddings.shape[1], retriever.ann_index_path)
-        query_vectors = _vector_retriever_queries(prepared, retriever, examples)
-        return _ann_candidates_from_vectors(
+        query_specs_by_example = [
+            _weighted_vector_query_specs(prepared, retriever, example)
+            for _, example in examples.iterrows()
+        ]
+        return _ann_candidates_from_query_specs(
             retriever.item_embeddings,
             retriever.ann_index,
-            query_vectors,
+            query_specs_by_example,
             examples,
             split_artifacts,
             top_k,
@@ -2753,7 +2952,11 @@ def evaluate_retriever(
             stage="retriever",
         )
         diagnostics.to_csv(prepared.config.eval_dir / f"{retriever.variant}_{split_name}_candidate_diagnostics_metrics.csv", index=False)
-        candidates_with_context.to_parquet(prepared.config.eval_dir / f"{retriever.variant}_{split_name}_retrieval_candidates.parquet", index=False)
+        atomic_write_parquet(
+            prepared.config.eval_dir / f"{retriever.variant}_{split_name}_retrieval_candidates.parquet",
+            candidates_with_context,
+            index=False,
+        )
     if not eval_frames:
         return _normalize_metrics_frame(None)
     return _normalize_metrics_frame(pd.concat(eval_frames, ignore_index=True))
@@ -2769,7 +2972,13 @@ def train_retriever(
         raise ValueError("variant must be 'two_tower' or 'dat_lite'")
     train_examples = _filter_retriever_examples(split_artifacts.train_examples, config)
     if config.retriever_train_example_cap is not None and len(train_examples) > config.retriever_train_example_cap:
-        train_examples = _sample_training_examples(train_examples, config.retriever_train_example_cap, config.seed)
+        category_balanced = variant == "dat_lite" and config.run_profile in {"quality-neural", "full"}
+        train_examples = _sample_training_examples(
+            train_examples,
+            config.retriever_train_example_cap,
+            config.seed,
+            category_balanced=category_balanced,
+        )
         print(f"Retriever training capped to {len(train_examples):,} base examples for notebook-safe memory usage.")
     val_examples = _filter_retriever_examples(split_artifacts.val_examples, config)
     if config.eval_user_cap is not None and len(val_examples) > config.eval_user_cap:
@@ -2880,7 +3089,7 @@ def train_retriever(
     gc.collect()
     ann_index_path = build_ann_index(config, item_embeddings, config.model_dir / f"{variant}_item_index.ann")
     model.save_weights(config.model_dir / f"{variant}_retriever.weights.h5")
-    np.save(config.model_dir / f"{variant}_item_embeddings.npy", item_embeddings)
+    atomic_save_npy(config.model_dir / f"{variant}_item_embeddings.npy", item_embeddings)
     retriever_metadata = {
         "variant": variant,
         "retriever_kind": "neural",
@@ -2890,8 +3099,7 @@ def train_retriever(
         "train_examples_used": int(len(train_examples)),
         "val_examples_used": int(len(val_examples)),
     }
-    with open(config.model_dir / f"{variant}_retriever_metadata.json", "w", encoding="utf-8") as handle:
-        json.dump(retriever_metadata, handle, indent=2)
+    atomic_write_json(config.model_dir / f"{variant}_retriever_metadata.json", retriever_metadata)
     if config.persist_encoder_models:
         user_encoder.save(config.model_dir / f"{variant}_user_encoder.keras", overwrite=True)
         item_encoder.save(config.model_dir / f"{variant}_item_encoder.keras", overwrite=True)
@@ -2929,15 +3137,22 @@ def train_retrievers(prepared: PreparedArtifacts, split_artifacts: SplitArtifact
     retrievers["latent_cf"] = train_latent_cf_retriever(prepared, split_artifacts)
     LOGGER.info("Latent collaborative-filtering retriever complete")
     if prepared.config.enable_neural_retriever:
-        LOGGER.info("Training neural two-tower retriever")
-        neural_retriever = train_retriever(prepared, split_artifacts, variant="two_tower")
+        neural_variant = prepared.config.neural_retriever_variant
+        LOGGER.info("Training neural retriever: variant=%s source_alias=two_tower", neural_variant)
+        if neural_variant == "blair_text":
+            from amazon_recsys.ml.retrievers.blair import train_blair_retriever
+            neural_retriever = train_blair_retriever(prepared, split_artifacts)
+        else:
+            neural_retriever = train_retriever(prepared, split_artifacts, variant=neural_variant)
         if _retriever_recovers_positives(neural_retriever.metrics):
+            neural_retriever.metadata["source_alias"] = "two_tower"
             retrievers["two_tower"] = neural_retriever
-            LOGGER.info("Neural two-tower retriever complete and enabled for candidate union")
+            LOGGER.info("Neural retriever complete and enabled for candidate union: variant=%s source_alias=two_tower", neural_variant)
         else:
             LOGGER.warning(
-                "Neural two-tower retriever completed but recovered no positives in evaluation. "
-                "It will be logged for diagnostics but excluded from candidate union."
+                "Neural retriever completed but recovered no positives in evaluation: variant=%s. "
+                "It will be logged for diagnostics but excluded from candidate union.",
+                neural_variant,
             )
     else:
         LOGGER.info("Skipping two_tower retriever because enable_neural_retriever is false")
@@ -2958,6 +3173,17 @@ def _candidate_source_budgets(config: PipelineConfig) -> dict[str, int]:
         "two_tower": int(config.neural_candidate_k),
         "popularity": int(config.popularity_backfill_k),
     }
+
+
+def _neural_retriever_from_map(retrievers: dict[str, RetrieverArtifacts]) -> RetrieverArtifacts | None:
+    for key in ("two_tower", "dat_lite"):
+        retriever = retrievers.get(key)
+        if retriever is not None:
+            return retriever
+    for retriever in retrievers.values():
+        if getattr(retriever, "variant", "") in {"two_tower", "dat_lite"}:
+            return retriever
+    return None
 
 
 def _empty_candidate_frame() -> pd.DataFrame:
@@ -3059,12 +3285,13 @@ def _source_candidate_frames(
         )
     else:
         frames["content_based"] = _normalize_candidate_frame(None, "content_based")
-    if "two_tower" in retrievers:
+    neural_retriever = _neural_retriever_from_map(retrievers)
+    if neural_retriever is not None:
         frames["two_tower"] = _normalize_candidate_frame(
             generate_candidates(
                 prepared,
                 split_artifacts,
-                retrievers["two_tower"],
+                neural_retriever,
                 examples,
                 top_k=budgets["two_tower"],
                 inject_target_if_missing=inject_target_if_missing,
@@ -3100,6 +3327,118 @@ def _candidate_metadata_from_example(example: pd.Series) -> Record:
         "avg_days_between": float(example["avg_days_between"]),
         **preference_features,
     }
+
+
+def _candidate_source_balance_quotas(top_k: int, *, include_neural: bool = False) -> dict[str, int]:
+    if include_neural:
+        fractions = {
+            "cooccurrence": 0.30,
+            "latent_cf": 0.20,
+            "content_based": 0.15,
+            "two_tower": 0.20,
+            "popularity": 0.15,
+        }
+        source_order = ("cooccurrence", "latent_cf", "content_based", "two_tower", "popularity")
+    else:
+        fractions = {
+            "cooccurrence": 0.40,
+            "latent_cf": 0.25,
+            "content_based": 0.20,
+            "popularity": 0.15,
+        }
+        source_order = ("cooccurrence", "latent_cf", "content_based", "popularity")
+    quotas = {source_name: int(math.floor(top_k * fraction)) for source_name, fraction in fractions.items()}
+    remainder = max(top_k - sum(quotas.values()), 0)
+    for source_name in source_order:
+        if remainder <= 0:
+            break
+        quotas[source_name] += 1
+        remainder -= 1
+    return quotas
+
+
+def _source_sorted_candidates(example_rows: pd.DataFrame, source_name: str) -> pd.DataFrame:
+    flag_column = f"from_{source_name}"
+    rank_column = f"rank_{source_name}"
+    if flag_column not in example_rows.columns:
+        return example_rows.iloc[0:0].copy()
+    subset = example_rows[example_rows[flag_column].fillna(0).astype(int) == 1].copy()
+    if subset.empty:
+        return subset
+    if rank_column not in subset.columns:
+        subset[rank_column] = np.inf
+    subset[rank_column] = pd.to_numeric(subset[rank_column], errors="coerce").fillna(np.inf)
+    return subset.sort_values([rank_column, "union_score", "source_count"], ascending=[True, False, False])
+
+
+def _select_candidate_union_rows(example_rows: pd.DataFrame, config: PipelineConfig, top_k: int) -> pd.DataFrame:
+    if example_rows.empty:
+        return example_rows.copy()
+    sorted_rows = example_rows.sort_values(["union_score", "source_count"], ascending=[False, False]).copy()
+    if not config.candidate_source_balance_enabled:
+        return sorted_rows.head(top_k).copy()
+    selected_items: set[int] = set()
+    selected_rows: list[Record] = []
+    include_neural = False
+    if "from_two_tower" in example_rows.columns:
+        include_neural = bool(pd.to_numeric(example_rows["from_two_tower"], errors="coerce").fillna(0).astype(int).sum() > 0)
+    quotas = _candidate_source_balance_quotas(top_k, include_neural=include_neural)
+
+    def _selected_source_count(source_name: str) -> int:
+        flag_column = f"from_{source_name}"
+        if not selected_rows or flag_column not in example_rows.columns:
+            return 0
+        count = 0
+        for row in selected_rows:
+            try:
+                if int(float(row.get(flag_column, 0) or 0)) == 1:
+                    count += 1
+            except (TypeError, ValueError):
+                continue
+        return count
+
+    def _append_row(row: pd.Series) -> bool:
+        item_idx = int(row["item_idx"])
+        if item_idx in selected_items:
+            return False
+        selected_items.add(item_idx)
+        selected_rows.append(row.to_dict())
+        return True
+
+    for source_name, quota in quotas.items():
+        needed = max(int(quota) - _selected_source_count(source_name), 0)
+        if needed <= 0:
+            continue
+        for _, row in _source_sorted_candidates(sorted_rows, source_name).iterrows():
+            if _append_row(row):
+                needed -= 1
+            if needed <= 0 or len(selected_rows) >= top_k:
+                break
+        if len(selected_rows) >= top_k:
+            break
+    if len(selected_rows) < top_k:
+        for _, row in sorted_rows.iterrows():
+            _append_row(row)
+            if len(selected_rows) >= top_k:
+                break
+    selected = pd.DataFrame(selected_rows)
+    if selected.empty:
+        return sorted_rows.head(top_k).copy()
+    return selected.sort_values(["union_score", "source_count"], ascending=[False, False]).head(top_k).copy()
+
+
+def _prune_ranker_candidates(candidates: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
+    if candidates.empty:
+        return candidates.copy()
+    rows: list[pd.DataFrame] = []
+    for _, group in candidates.groupby("example_id", sort=False):
+        if config.candidate_source_balance_enabled and "union_score" in group.columns:
+            rows.append(_select_candidate_union_rows(group.copy(), config, config.ranker_candidate_top_k))
+        else:
+            rows.append(group.sort_values("retrieval_score", ascending=False).head(config.ranker_candidate_top_k).copy())
+    if not rows:
+        return candidates.iloc[0:0].copy()
+    return pd.concat(rows, ignore_index=True)
 
 
 def generate_candidate_union(
@@ -3157,29 +3496,26 @@ def generate_candidate_union(
                 row[f"rank_{source_name}"] = int(candidate.rank)
                 row["source_count"] += 1
                 row["union_score"] += source_weights[source_name] / max(int(candidate.rank), 1)
-        if len(item_map) < top_k:
-            popularity_frame = grouped_frames["popularity"].get_group(example_id) if example_id in grouped_frames["popularity"].groups else None
-            if popularity_frame is not None:
-                for candidate in popularity_frame.itertuples(index=False):
-                    item_idx = int(candidate.item_idx)
-                    row = item_map.setdefault(
-                        item_idx,
-                        {
-                            **example_meta,
-                            "item_idx": item_idx,
-                            "label": int(item_idx == example_meta["target_item_idx"]),
-                            "source_count": 0,
-                            "union_score": 0.0,
-                        },
-                    )
-                    row.setdefault("from_popularity", 1)
-                    row.setdefault("score_popularity", float(candidate.retrieval_score))
-                    row.setdefault("rank_popularity", int(candidate.rank))
-                    if row["source_count"] == 0:
-                        row["source_count"] = 1
-                    row["union_score"] += source_weights["popularity"] / max(int(candidate.rank), 1)
-                    if len(item_map) >= top_k:
-                        break
+        popularity_frame = grouped_frames["popularity"].get_group(example_id) if example_id in grouped_frames["popularity"].groups else None
+        if popularity_frame is not None:
+            for candidate in popularity_frame.itertuples(index=False):
+                item_idx = int(candidate.item_idx)
+                row = item_map.setdefault(
+                    item_idx,
+                    {
+                        **example_meta,
+                        "item_idx": item_idx,
+                        "label": int(item_idx == example_meta["target_item_idx"]),
+                        "source_count": 0,
+                        "union_score": 0.0,
+                    },
+                )
+                if not int(row.get("from_popularity", 0) or 0):
+                    row["source_count"] += 1
+                row["from_popularity"] = 1
+                row.setdefault("score_popularity", float(candidate.retrieval_score))
+                row.setdefault("rank_popularity", int(candidate.rank))
+                row["union_score"] += source_weights["popularity"] / max(int(candidate.rank), 1)
         target_item_idx = int(example_meta["target_item_idx"])
         if inject_target_if_missing and str(example_meta["split"]) != "inference" and target_item_idx not in item_map:
             item_map[target_item_idx] = {
@@ -3218,7 +3554,7 @@ def generate_candidate_union(
             example_rows[f"score_{source_name}"] = example_rows.get(f"score_{source_name}", 0.0)
             example_rows[f"rank_{source_name}"] = example_rows.get(f"rank_{source_name}", budget + 1)
         example_rows["union_score"] = example_rows["union_score"].astype(float)
-        example_rows = example_rows.sort_values(["union_score", "source_count"], ascending=[False, False]).head(top_k).copy()
+        example_rows = _select_candidate_union_rows(example_rows, prepared.config, top_k)
         example_rows["retrieval_score"] = example_rows["union_score"]
         example_rows["rank"] = np.arange(1, len(example_rows) + 1, dtype=np.int32)
         rows.append(example_rows)
@@ -3737,12 +4073,7 @@ def run_candidate_recovery_diagnostics(
                 scenario=scenario,
             )
         )
-        pruned = (
-            candidates.sort_values(["example_id", "retrieval_score"], ascending=[True, False])
-            .groupby("example_id", group_keys=False)
-            .head(prepared.config.ranker_candidate_top_k)
-            .reset_index(drop=True)
-        )
+        pruned = _prune_ranker_candidates(candidates, prepared.config)
         total_ranker_candidate_rows += int(len(pruned))
         pruned_with_context = _add_candidate_item_context(prepared, pruned)
         diagnostics_frames.append(
@@ -4144,11 +4475,95 @@ def _build_ranker_model(config: PipelineConfig, num_users: int, num_items: int, 
     return model
 
 
-def _rebalance_ranker_candidates(candidates: pd.DataFrame, negatives_per_positive: int, seed: int) -> pd.DataFrame:
+def _parse_hardneg_mix(value: str) -> tuple[float, float, float]:
+    """Parse ``"<popularity>,<cooccurrence>,<random>"`` into a normalised weight triple.
+
+    Raises ``ValueError`` on any malformed input so the failure surfaces at config-construction
+    time (via ``PipelineConfig.__post_init__``) rather than 5 minutes into training.
+    """
+    parts = [chunk.strip() for chunk in str(value).split(",") if chunk.strip()]
+    if len(parts) != 3:
+        raise ValueError("ranker_hardneg_mix must be three comma-separated weights for popularity,cooccurrence,random.")
+    try:
+        weights = tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError(f"ranker_hardneg_mix weights must be numeric, got {value!r}.") from exc
+    if any(weight < 0 for weight in weights):
+        raise ValueError("ranker_hardneg_mix weights must be non-negative.")
+    total = sum(weights)
+    if total <= 0:
+        raise ValueError("ranker_hardneg_mix weights must sum to a positive value.")
+    normalised = tuple(weight / total for weight in weights)
+    return normalised  # type: ignore[return-value]
+
+
+def _sample_negatives_by_source_mix(
+    negatives: pd.DataFrame,
+    target_count: int,
+    mix_weights: tuple[float, float, float],
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    """Draw ``target_count`` negatives biased by source: (popularity, cooccurrence, random).
+
+    The negatives passed in already come from the candidate-union sources (each row has a
+    ``source`` column). For each row whose ``source`` is ``popularity`` or ``cooccurrence`` we
+    treat it as belonging to the corresponding pool; everything else (latent_cf, content_based,
+    two_tower, etc.) is the "random" pool.
+
+    Short pools are topped up from any remaining negatives so the final count matches
+    ``target_count`` whenever enough negatives exist.
+
+    When ``mix_weights == (0, 0, 1)`` the function reduces to pure uniform random sampling —
+    bit-for-bit identical to the legacy behaviour for the same RNG seed.
+    """
+    if negatives.empty or target_count <= 0:
+        return negatives.iloc[0:0].copy()
+    if len(negatives) <= target_count:
+        return negatives
+
+    pop_weight, cooc_weight, _rand_weight = mix_weights
+    if pop_weight + cooc_weight <= 0:
+        return negatives.sample(n=target_count, random_state=int(rng.integers(0, 1_000_000)))
+
+    source = negatives.get("source")
+    if source is None:
+        return negatives.sample(n=target_count, random_state=int(rng.integers(0, 1_000_000)))
+
+    pop_pool = negatives[source == "popularity"]
+    cooc_pool = negatives[source == "cooccurrence"]
+    rand_pool = negatives[~source.isin({"popularity", "cooccurrence"})]
+
+    pop_target = int(round(target_count * pop_weight))
+    cooc_target = int(round(target_count * cooc_weight))
+    rand_target = max(0, target_count - pop_target - cooc_target)
+
+    def _draw(pool: pd.DataFrame, count: int) -> pd.DataFrame:
+        if pool.empty or count <= 0:
+            return pool.iloc[0:0].copy()
+        if len(pool) <= count:
+            return pool.copy()
+        return pool.sample(n=count, random_state=int(rng.integers(0, 1_000_000)))
+
+    drawn = pd.concat([_draw(pop_pool, pop_target), _draw(cooc_pool, cooc_target), _draw(rand_pool, rand_target)], ignore_index=False)
+    deficit = target_count - len(drawn)
+    if deficit > 0:
+        remaining = negatives.drop(drawn.index, errors="ignore")
+        if not remaining.empty:
+            drawn = pd.concat([drawn, _draw(remaining, deficit)], ignore_index=False)
+    return drawn
+
+
+def _rebalance_ranker_candidates(
+    candidates: pd.DataFrame,
+    negatives_per_positive: int,
+    seed: int,
+    hardneg_mix: str = "0,0,1.0",
+) -> pd.DataFrame:
     if candidates.empty or negatives_per_positive <= 0:
         return candidates
     sampled_groups: list[pd.DataFrame] = []
     rng = np.random.default_rng(seed)
+    mix_weights = _parse_hardneg_mix(hardneg_mix)
     for _, group in candidates.groupby("example_id", sort=False):
         positives = group[group["label"] == 1]
         negatives = group[group["label"] == 0]
@@ -4157,7 +4572,7 @@ def _rebalance_ranker_candidates(candidates: pd.DataFrame, negatives_per_positiv
             continue
         max_negatives = max(len(positives) * negatives_per_positive, negatives_per_positive)
         if len(negatives) > max_negatives:
-            negatives = negatives.sample(n=max_negatives, random_state=int(rng.integers(0, 1_000_000)))
+            negatives = _sample_negatives_by_source_mix(negatives, max_negatives, mix_weights, rng)
         sampled_groups.append(pd.concat([positives, negatives], ignore_index=True).sort_values("rank"))
     return pd.concat(sampled_groups, ignore_index=True)
 
@@ -4165,7 +4580,10 @@ def _rebalance_ranker_candidates(candidates: pd.DataFrame, negatives_per_positiv
 def _select_embedding_retriever(retrievers: RetrieverArtifacts | dict[str, RetrieverArtifacts]) -> RetrieverArtifacts:
     if isinstance(retrievers, RetrieverArtifacts):
         return retrievers
-    for key in ["two_tower", "latent_cf", "content_based"]:
+    for retriever in retrievers.values():
+        if getattr(retriever, "variant", "") == "dat_lite":
+            return retriever
+    for key in ["dat_lite", "two_tower", "latent_cf", "content_based"]:
         if key in retrievers:
             return retrievers[key]
     return next(iter(retrievers.values()))
@@ -4225,12 +4643,7 @@ def _ranker_candidates_for_examples(
                 inject_target_if_missing=inject_target_if_missing,
                 include_candidate_sources=False,
             )
-            pruned = (
-                candidates.sort_values(["example_id", "retrieval_score"], ascending=[True, False])
-                .groupby("example_id", group_keys=False)
-                .head(prepared.config.ranker_candidate_top_k)
-                .reset_index(drop=True)
-            )
+            pruned = _prune_ranker_candidates(candidates, prepared.config)
             candidate_batches.append(pruned)
             del candidates
             gc.collect()
@@ -4307,12 +4720,7 @@ def evaluate_ranker(
             )
             union_diagnostics.to_csv(prepared.config.eval_dir / f"{variant}_{split_name}_candidate_union_diagnostics_metrics.csv", index=False)
             union_diagnostic_frames.append(union_diagnostics)
-            candidate_frame = (
-                union_frame.sort_values(["example_id", "retrieval_score"], ascending=[True, False])
-                .groupby("example_id", group_keys=False)
-                .head(prepared.config.ranker_candidate_top_k)
-                .reset_index(drop=True)
-            )
+            candidate_frame = _prune_ranker_candidates(union_frame, prepared.config)
             del union_frame
             del union_with_context
         else:
@@ -4365,7 +4773,11 @@ def evaluate_ranker(
                 split=split_name,
             )
             candidate_recovery_frames.append(recovery_payload["diagnostics"])
-        ranked_with_context.to_parquet(prepared.config.eval_dir / f"{metrics.iloc[0]['variant']}_{split_name}_ranked_candidates.parquet", index=False)
+        atomic_write_parquet(
+            prepared.config.eval_dir / f"{metrics.iloc[0]['variant']}_{split_name}_ranked_candidates.parquet",
+            ranked_with_context,
+            index=False,
+        )
         del candidate_frame
         del candidate_frame_with_context
         del ranker_metadata
@@ -4434,8 +4846,18 @@ def train_ranker(
         val_examples,
         inject_target_if_missing=True,
     )
-    train_candidates = _rebalance_ranker_candidates(train_candidates, config.ranker_negatives_per_positive, config.seed)
-    val_candidates = _rebalance_ranker_candidates(val_candidates, config.ranker_negatives_per_positive, config.seed)
+    train_candidates = _rebalance_ranker_candidates(
+        train_candidates,
+        config.ranker_negatives_per_positive,
+        config.seed,
+        hardneg_mix=config.ranker_hardneg_mix,
+    )
+    val_candidates = _rebalance_ranker_candidates(
+        val_candidates,
+        config.ranker_negatives_per_positive,
+        config.seed,
+        hardneg_mix=config.ranker_hardneg_mix,
+    )
     LOGGER.info(
         "Ranker candidate tables ready: train_candidates=%s val_candidates=%s",
         f"{len(train_candidates):,}",
@@ -4942,6 +5364,9 @@ def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
             {"name": "retriever_logit_scale", "value": config.retriever_logit_scale},
             {"name": "persist_encoder_models", "value": config.persist_encoder_models},
             {"name": "enable_neural_retriever", "value": config.enable_neural_retriever},
+            {"name": "neural_retriever_variant", "value": config.neural_retriever_variant},
+            {"name": "dat_mimic_weight", "value": config.dat_mimic_weight},
+            {"name": "dat_category_alignment_weight", "value": config.dat_category_alignment_weight},
             {"name": "retrieval_top_k", "value": config.retrieval_top_k},
             {"name": "cooccurrence_candidate_k", "value": config.cooccurrence_candidate_k},
             {"name": "latent_cf_candidate_k", "value": config.latent_cf_candidate_k},
@@ -4950,6 +5375,8 @@ def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
             {"name": "popularity_backfill_k", "value": config.popularity_backfill_k},
             {"name": "category_backfill_enabled", "value": config.category_backfill_enabled},
             {"name": "recency_cooccurrence_enabled", "value": config.recency_cooccurrence_enabled},
+            {"name": "candidate_source_balance_enabled", "value": config.candidate_source_balance_enabled},
+            {"name": "vector_retriever_trigger_count", "value": config.vector_retriever_trigger_count},
             {"name": "candidate_union_top_k", "value": config.candidate_union_top_k},
             {"name": "candidate_union_batch_size", "value": config.candidate_union_batch_size},
             {"name": "ranker_candidate_top_k", "value": config.ranker_candidate_top_k},
@@ -4971,7 +5398,6 @@ def save_config(config: PipelineConfig) -> Path:
     config_path = config.artifact_root / "config.json"
     serializable = asdict(config)
     serializable["base_dir"] = str(config.base_dir)
-    with open(config_path, "w", encoding="utf-8") as handle:
-        json.dump(serializable, handle, indent=2)
+    atomic_write_json(config_path, serializable)
     return config_path
 

@@ -6,6 +6,7 @@ import gzip
 import json
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -108,7 +109,25 @@ def build_synthetic_workspace(root: Path) -> Path:
 
 @pytest.fixture
 def workspace_dir(request) -> Path:
-    root = Path(__file__).resolve().parent / ".tmp" / f"{request.node.name}-{uuid4().hex}"
+    scratch_root_candidates = [Path(tempfile.gettempdir()) / "amazon_recsys_pytest"]
+    if sys.platform.startswith("win"):
+        c_tmp = Path("C:/tmp")
+        if c_tmp.exists():
+            scratch_root_candidates.insert(0, c_tmp / "amazon_recsys_pytest")
+    scratch_root: Path | None = None
+    for candidate in scratch_root_candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / f".write_probe_{uuid4().hex}"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            scratch_root = candidate
+            break
+        except OSError:
+            continue
+    if scratch_root is None:
+        raise RuntimeError("No writable scratch directory is available for pytest workspace fixtures.")
+    root = scratch_root / f"{request.node.name}-{uuid4().hex}"
     root.mkdir(parents=True, exist_ok=False)
     yield root
     shutil.rmtree(root, ignore_errors=True)
