@@ -64,6 +64,9 @@ def test_training_bundle_round_trip(test_container, train_export_activate) -> No
     assert "candidate_union_recall_by_category.csv" in metric_file_names
     assert "candidate_union_recall_by_source.csv" in metric_file_names
     assert "candidate_union_recall_by_history_bucket.csv" in metric_file_names
+    assert "ranker_demotion_diagnostics.csv" in metric_file_names
+    assert "ranker_demotion_summary.csv" in metric_file_names
+    assert "ranker_feature_ablation_metrics.csv" in metric_file_names
     assert "served_distribution_by_category_price.csv" in metric_file_names
 
     client = TestClient(create_app(test_container.settings))
@@ -110,6 +113,239 @@ def test_candidate_recall_diagnostics_break_down_categories_and_sources() -> Non
     assert by_scope[("target_price_bucket", "price_low")]["positive_recoveries"] == 1
     assert by_scope[("candidate_source", "cooccurrence")]["positive_recoveries"] == 1
     assert by_scope[("cold_start_user_type", "anonymous_no_history")]["hit_rate"] == pytest.approx(0.0)
+
+
+@pytest.mark.ranking
+def test_make_splits_includes_target_interaction_signals(workspace_dir: Path) -> None:
+    config = core.PipelineConfig(
+        base_dir=workspace_dir,
+        categories=("Automotive",),
+        k_core=2,
+        history_len=3,
+        metadata_download_if_missing=False,
+    )
+    interactions = pd.DataFrame(
+        [
+            {"user_id": "u1", "parent_asin": "A1", "source_category": "Automotive", "timestamp": 1_700_000_000_000, "rating": 4.0, "verified_purchase": True, "helpful_vote": 0},
+            {"user_id": "u1", "parent_asin": "A2", "source_category": "Automotive", "timestamp": 1_700_000_001_000, "rating": 5.0, "verified_purchase": True, "helpful_vote": 2},
+            {"user_id": "u1", "parent_asin": "A3", "source_category": "Automotive", "timestamp": 1_700_000_002_000, "rating": 3.0, "verified_purchase": False, "helpful_vote": 0},
+            {"user_id": "u1", "parent_asin": "A4", "source_category": "Automotive", "timestamp": 1_700_000_003_000, "rating": 5.0, "verified_purchase": True, "helpful_vote": 5},
+        ]
+    )
+    prepared = core.PreparedArtifacts(
+        config=config,
+        raw_review_stats=pd.DataFrame(),
+        kcore_stats=pd.DataFrame(),
+        interactions=interactions,
+        hard_negatives=pd.DataFrame(columns=["user_id", "timestamp", "parent_asin"]),
+        item_features=pd.DataFrame(
+            [
+                {"parent_asin": "A1", "item_idx": 1, "source_category": "Automotive"},
+                {"parent_asin": "A2", "item_idx": 2, "source_category": "Automotive"},
+                {"parent_asin": "A3", "item_idx": 3, "source_category": "Automotive"},
+                {"parent_asin": "A4", "item_idx": 4, "source_category": "Automotive"},
+            ]
+        ),
+        item_text_matrix=np.zeros((4, 2), dtype=np.float32),
+        vectorizer=object(),
+        svd=object(),
+        item_id_to_idx={"A1": 1, "A2": 2, "A3": 3, "A4": 4},
+        item_idx_to_id={1: "A1", 2: "A2", 3: "A3", 4: "A4"},
+        category_to_idx={"Automotive": 1},
+    )
+
+    split_artifacts = core.make_splits(prepared)
+
+    assert set(["target_rating", "target_verified_purchase", "target_helpful_vote"]).issubset(split_artifacts.train_examples.columns)
+    assert split_artifacts.train_examples.iloc[0]["target_rating"] == pytest.approx(5.0)
+    assert int(split_artifacts.val_examples.iloc[0]["target_verified_purchase"]) == 0
+    assert split_artifacts.test_examples.iloc[0]["target_helpful_vote"] == pytest.approx(5.0)
+
+
+@pytest.mark.ranking
+def test_ranker_sample_weights_boost_only_positive_rows() -> None:
+    config = core.PipelineConfig(ranker_recent_positive_days=30)
+    metadata = pd.DataFrame(
+        [
+            {"label": 1, "target_rating": 5.0, "target_verified_purchase": 1, "target_helpful_vote": 3, "target_timestamp": pd.Timestamp("2026-05-10", tz="UTC")},
+            {"label": 1, "target_rating": 4.0, "target_verified_purchase": 0, "target_helpful_vote": 0, "target_timestamp": pd.Timestamp("2025-01-01", tz="UTC")},
+            {"label": 0, "target_rating": 5.0, "target_verified_purchase": 1, "target_helpful_vote": 3, "target_timestamp": pd.Timestamp("2026-05-10", tz="UTC")},
+        ]
+    )
+
+    weights = core._ranker_sample_weights(metadata, config)
+
+    assert weights[0] == pytest.approx(1.25 * 1.15 * 1.10 * 1.10)
+    assert weights[1] == pytest.approx(1.0)
+    assert weights[2] == pytest.approx(1.0)
+    np.testing.assert_allclose(core._ranker_group_sample_weights(weights, [2, 1]), np.asarray([weights[0], 1.0], dtype=np.float32))
+
+
+@pytest.mark.ranking
+def test_ranker_demotion_diagnostics_bucket_recovered_positives() -> None:
+    candidate_union = pd.DataFrame(
+        [
+            {"example_id": 1, "item_idx": 101, "target_item_idx": 101, "label": 1, "rank": 1, "target_source_category": "Automotive", "history_length": 1, "from_cooccurrence": 1},
+            {"example_id": 2, "item_idx": 102, "target_item_idx": 102, "label": 1, "rank": 2, "target_source_category": "Automotive", "history_length": 4, "from_cooccurrence": 1},
+            {"example_id": 3, "item_idx": 103, "target_item_idx": 103, "label": 1, "rank": 3, "target_source_category": "Automotive", "history_length": 4, "from_cooccurrence": 1},
+            {"example_id": 4, "item_idx": 104, "target_item_idx": 104, "label": 1, "rank": 4, "target_source_category": "Beauty", "history_length": 12, "from_latent_cf": 1},
+            {"example_id": 5, "item_idx": 105, "target_item_idx": 105, "label": 1, "rank": 5, "target_source_category": "Beauty", "history_length": 12, "from_latent_cf": 1},
+        ]
+    )
+    ranker_candidates = pd.DataFrame(
+        [
+            {"example_id": 2, "item_idx": 999, "label": 0, "rank": 1},
+            {"example_id": 2, "item_idx": 102, "label": 1, "rank": 2},
+            {"example_id": 3, "item_idx": 103, "label": 1, "rank": 1},
+            {"example_id": 4, "item_idx": 104, "label": 1, "rank": 1},
+            {"example_id": 5, "item_idx": 105, "label": 1, "rank": 1},
+        ]
+    )
+    ranked = pd.DataFrame(
+        [
+            {"example_id": 2, "item_idx": 102, "rank": 1, "ranker_score": 0.9},
+            {"example_id": 3, "item_idx": 103, "rank": 15, "ranker_score": 0.3},
+            {"example_id": 4, "item_idx": 104, "rank": 60, "ranker_score": 0.2},
+            {"example_id": 5, "item_idx": 105, "rank": 101, "ranker_score": 0.1},
+        ]
+    )
+
+    diagnostics = core.ranker_demotion_diagnostics(
+        candidate_union,
+        ranker_candidates,
+        ranked,
+        split="test",
+        variant="hybrid_union",
+    )
+
+    buckets = dict(zip(diagnostics["example_id"], diagnostics["demotion_bucket"]))
+    assert buckets == {
+        1: "lost",
+        2: "preserved",
+        3: "demoted_top10",
+        4: "demoted_top50",
+        5: "demoted_top100",
+    }
+    summary = core.ranker_demotion_summary(diagnostics)
+    assert set(summary["demotion_bucket"]).issuperset(set(buckets.values()))
+
+
+@pytest.mark.ranking
+def test_ranker_feature_ablation_masks_only_selected_columns() -> None:
+    config = core.PipelineConfig(categories=("Automotive",))
+    feature_frame = pd.DataFrame(
+        {
+            "retrieval_score": [0.8, 0.3],
+            "from_cooccurrence": [1, 0],
+            "rank_cooccurrence": [1, 2],
+            "source_count": [2, 1],
+            "pref_Automotive": [0.7, 0.1],
+            "price": [10.0, 20.0],
+            "explicit_hard_negative": [1, 0],
+        }
+    )
+
+    masked = core._mask_ranker_feature_group(
+        feature_frame,
+        core._ranker_feature_ablation_groups(config)["source_flags_ranks"],
+    )
+
+    assert masked["from_cooccurrence"].tolist() == [0.0, 0.0]
+    assert masked["rank_cooccurrence"].tolist() == [3.0, 3.0]
+    assert masked["source_count"].tolist() == [0.0, 0.0]
+    assert masked["retrieval_score"].tolist() == feature_frame["retrieval_score"].tolist()
+    assert masked["pref_Automotive"].tolist() == feature_frame["pref_Automotive"].tolist()
+    assert masked["price"].tolist() == feature_frame["price"].tolist()
+
+
+@pytest.mark.ranking
+def test_xgboost_ranker_fit_receives_sample_weights(monkeypatch, workspace_dir: Path) -> None:
+    config = core.PipelineConfig(
+        base_dir=workspace_dir,
+        categories=("Automotive",),
+        ranker_label_weighting_enabled=True,
+        xgb_early_stopping_rounds=None,
+    )
+    core.ensure_directories(config)
+    prepared = SimpleNamespace(config=config)
+    split_artifacts = SimpleNamespace(
+        train_examples=pd.DataFrame([{"split": "train"}]),
+        val_examples=pd.DataFrame([{"split": "val"}]),
+    )
+    retrievers = {"content_based": SimpleNamespace(variant="content_based")}
+    captured_fit_kwargs: dict[str, object] = {}
+
+    class FakeRanker:
+        def __init__(self, **_kwargs):
+            pass
+
+        def fit(self, _frame, _labels, **kwargs):
+            captured_fit_kwargs.update(kwargs)
+            return self
+
+        def evals_result(self):
+            return {"validation_0": {"ndcg@10": [1.0]}}
+
+        def save_model(self, path):
+            Path(path).write_text("fake model", encoding="utf-8")
+
+    def fake_candidates(_prepared, _split_artifacts, _retrievers, examples, **_kwargs):
+        return pd.DataFrame([{"phase": examples.iloc[0]["split"]}])
+
+    def fake_xgboost_frame(_prepared, _split_artifacts, _retriever, candidates):
+        phase = str(candidates.iloc[0]["phase"])
+        metadata = pd.DataFrame(
+            [
+                {"example_id": 1, "label": 1, "target_rating": 5.0, "target_verified_purchase": 1, "target_helpful_vote": 2, "target_timestamp": pd.Timestamp("2026-05-10", tz="UTC")},
+                {"example_id": 1, "label": 0, "target_rating": 5.0, "target_verified_purchase": 1, "target_helpful_vote": 2, "target_timestamp": pd.Timestamp("2026-05-10", tz="UTC")},
+            ]
+        )
+        frame = pd.DataFrame({"retrieval_score": [0.8, 0.2], "rank": [1.0, 2.0]})
+        labels = np.asarray([1, 0], dtype=np.int32)
+        if phase == "val":
+            frame = frame.copy()
+        return metadata, frame, labels, [2]
+
+    monkeypatch.setattr(core, "xgb", SimpleNamespace(XGBRanker=FakeRanker))
+    monkeypatch.setattr(core, "_ranker_candidates_for_examples", fake_candidates)
+    monkeypatch.setattr(core, "_rebalance_ranker_candidates", lambda candidates, *_args, **_kwargs: candidates)
+    monkeypatch.setattr(core, "_xgboost_ranker_frame", fake_xgboost_frame)
+    monkeypatch.setattr(
+        core,
+        "evaluate_ranker",
+        lambda *_args, **_kwargs: pd.DataFrame([{"K": 10, "recall": 1.0, "mrr": 1.0, "ndcg": 1.0, "split": "val", "variant": "hybrid_union", "stage": "ranker"}]),
+    )
+
+    core.train_ranker(prepared, split_artifacts, retrievers, backend="xgboost")
+
+    assert "sample_weight" in captured_fit_kwargs
+    assert "sample_weight_eval_set" in captured_fit_kwargs
+    train_weights = captured_fit_kwargs["sample_weight"]
+    assert train_weights[0] > train_weights[1]
+    assert train_weights[1] == pytest.approx(1.0)
+
+
+@pytest.mark.ranking
+def test_pipeline_config_from_settings_exposes_ranker_weight_knobs(test_settings) -> None:
+    settings = test_settings.model_copy(
+        update={
+            "ranker_label_weighting_enabled": False,
+            "ranker_positive_rating5_weight": 1.5,
+            "ranker_verified_positive_weight": 1.2,
+            "ranker_helpful_positive_weight": 1.1,
+            "ranker_recent_positive_weight": 1.05,
+            "ranker_recent_positive_days": 45,
+        }
+    )
+
+    config = pipeline_config_from_settings(settings)
+
+    assert config.ranker_label_weighting_enabled is False
+    assert config.ranker_positive_rating5_weight == pytest.approx(1.5)
+    assert config.ranker_verified_positive_weight == pytest.approx(1.2)
+    assert config.ranker_helpful_positive_weight == pytest.approx(1.1)
+    assert config.ranker_recent_positive_weight == pytest.approx(1.05)
+    assert config.ranker_recent_positive_days == 45
 
 
 @pytest.mark.retrieval

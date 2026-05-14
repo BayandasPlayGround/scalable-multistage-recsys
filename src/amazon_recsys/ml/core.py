@@ -150,6 +150,12 @@ class PipelineConfig:
     # uniform-random behaviour exactly. Set to e.g. ``"0.6,0.3,0.1"`` to bias negatives toward
     # popularity-weighted + cooccurrence-hard samples, which is the recommended Phase-D mix.
     ranker_hardneg_mix: str = "0,0,1.0"
+    ranker_label_weighting_enabled: bool = True
+    ranker_positive_rating5_weight: float = 1.25
+    ranker_verified_positive_weight: float = 1.15
+    ranker_helpful_positive_weight: float = 1.10
+    ranker_recent_positive_weight: float = 1.10
+    ranker_recent_positive_days: int = 90
     ranker_batch_size: int = 512
     ranker_epochs: int = 3
     candidate_union_batch_size: int = 500
@@ -249,6 +255,17 @@ class PipelineConfig:
                 raise ValueError(f"{field_name} values must be non-negative.")
             if sum(float(value) for value in values) <= 0:
                 raise ValueError(f"{field_name} values must include at least one positive value.")
+        ranker_weight_values = {
+            "ranker_positive_rating5_weight": self.ranker_positive_rating5_weight,
+            "ranker_verified_positive_weight": self.ranker_verified_positive_weight,
+            "ranker_helpful_positive_weight": self.ranker_helpful_positive_weight,
+            "ranker_recent_positive_weight": self.ranker_recent_positive_weight,
+        }
+        for field_name, value in ranker_weight_values.items():
+            if float(value) <= 0:
+                raise ValueError(f"{field_name} must be positive.")
+        if int(self.ranker_recent_positive_days) <= 0:
+            raise ValueError("ranker_recent_positive_days must be positive.")
         if self.xgb_early_stopping_rounds is not None and int(self.xgb_early_stopping_rounds) <= 0:
             raise ValueError("xgb_early_stopping_rounds must be positive when set.")
         if self.min_free_disk_gb is not None and float(self.min_free_disk_gb) < 0:
@@ -1510,6 +1527,24 @@ def _compute_prefix_features(
     }
 
 
+def _target_signal_features(row: pd.Series | Record) -> Record:
+    getter = row.get if hasattr(row, "get") else dict(row).get
+    rating = _coerce_float(getter("target_rating", getter("rating", np.nan)))
+    helpful_vote = _coerce_float(getter("target_helpful_vote", getter("helpful_vote", 0)))
+    if pd.isna(rating):
+        rating = 0.0
+    if pd.isna(helpful_vote):
+        helpful_vote = 0.0
+    verified_value = getter("target_verified_purchase", getter("verified_purchase", False))
+    if pd.isna(verified_value):
+        verified_value = False
+    return {
+        "target_rating": float(rating),
+        "target_verified_purchase": int(bool(verified_value)),
+        "target_helpful_vote": float(helpful_vote),
+    }
+
+
 def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
     config = prepared.config
     set_global_seed(config.seed)
@@ -1557,6 +1592,7 @@ def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
                 "target_parent_asin": target_row["parent_asin"],
                 "target_source_category": target_row["source_category"],
                 "target_timestamp": pd.to_datetime(int(target_row["timestamp"]), unit="ms", utc=True),
+                **_target_signal_features(target_row),
                 **prefix_features,
             }
             train_seen_count = _append_reservoir_sample(
@@ -1577,6 +1613,7 @@ def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
             "target_parent_asin": val_row["parent_asin"],
             "target_source_category": val_row["source_category"],
             "target_timestamp": pd.to_datetime(int(val_row["timestamp"]), unit="ms", utc=True),
+            **_target_signal_features(val_row),
             **prefix_features,
         }
         val_seen_count = _append_reservoir_sample(
@@ -1598,6 +1635,7 @@ def make_splits(prepared: PreparedArtifacts) -> SplitArtifacts:
             "target_parent_asin": test_row["parent_asin"],
             "target_source_category": test_row["source_category"],
             "target_timestamp": pd.to_datetime(int(test_row["timestamp"]), unit="ms", utc=True),
+            **_target_signal_features(test_row),
             **prefix_features,
         }
         test_seen_count = _append_reservoir_sample(
@@ -2658,6 +2696,7 @@ def _ann_candidates_from_query_specs(
                     "target_parent_asin": example["target_parent_asin"],
                     "target_timestamp": example["target_timestamp"],
                     "target_source_category": example.get("target_source_category", ""),
+                    **_target_signal_features(example),
                     "history_length": int(example.get("history_length", len(example_history))),
                     "item_idx": int(item_idx),
                     "retrieval_score": float(score),
@@ -2921,6 +2960,7 @@ def generate_candidates(
                     "target_parent_asin": example["target_parent_asin"],
                     "target_timestamp": example["target_timestamp"],
                     "target_source_category": example.get("target_source_category", ""),
+                    **_target_signal_features(example),
                     "history_length": int(example.get("history_length", len(example_history))),
                     "item_idx": int(item_idx),
                     "retrieval_score": float(score),
@@ -3296,6 +3336,9 @@ def _empty_candidate_frame() -> pd.DataFrame:
             "target_parent_asin",
             "target_timestamp",
             "target_source_category",
+            "target_rating",
+            "target_verified_purchase",
+            "target_helpful_vote",
             "history_length",
             "item_idx",
             "retrieval_score",
@@ -3417,6 +3460,7 @@ def _candidate_metadata_from_example(example: pd.Series) -> Record:
         "target_parent_asin": example["target_parent_asin"],
         "target_timestamp": example["target_timestamp"],
         "target_source_category": example["target_source_category"],
+        **_target_signal_features(example),
         "user_interaction_count": float(example["user_interaction_count"]),
         "history_length": int(example["history_length"]) if "history_length" in example.index else len(_normalize_history_item_idxs(example["history_item_idxs"])),
         "user_mean_rating": float(example["user_mean_rating"]),
@@ -4388,6 +4432,74 @@ def _hard_negative_flag_for_candidate(
     return 0
 
 
+def _ranker_metadata_defaults() -> dict[str, object]:
+    defaults: dict[str, object] = {
+        "example_id": 0,
+        "split": "",
+        "user_id": "",
+        "user_idx": 0,
+        "item_idx": 0,
+        "retrieval_score": 0.0,
+        "rank": 0,
+        "label": 0,
+        "target_item_idx": 0,
+        "target_source_category": "",
+        "target_timestamp": pd.NaT,
+        "history_length": 0,
+        "target_rating": 0.0,
+        "target_verified_purchase": 0,
+        "target_helpful_vote": 0.0,
+        "source_count": 0,
+        "union_score": 0.0,
+        "candidate_sources": "",
+        "from_injected_positive": 0,
+    }
+    for source_name in ["cooccurrence", "latent_cf", "content_based", "two_tower", "popularity"]:
+        defaults[f"from_{source_name}"] = 0
+        defaults[f"score_{source_name}"] = 0.0
+        defaults[f"rank_{source_name}"] = 0
+    return defaults
+
+
+def _ranker_metadata_frame(candidates: pd.DataFrame, item_category_idx: np.ndarray | None = None) -> pd.DataFrame:
+    defaults = _ranker_metadata_defaults()
+    metadata = candidates.reindex(columns=list(defaults)).copy()
+    for column, default in defaults.items():
+        if column not in candidates.columns:
+            metadata[column] = default
+        elif default is not pd.NaT:
+            metadata[column] = metadata[column].fillna(default)
+    if item_category_idx is None:
+        metadata["item_category_idx"] = pd.Series(dtype=np.int32)
+    else:
+        metadata["item_category_idx"] = item_category_idx
+    ordered = [
+        "example_id",
+        "split",
+        "user_id",
+        "user_idx",
+        "item_idx",
+        "item_category_idx",
+        "retrieval_score",
+        "rank",
+        "label",
+        "target_item_idx",
+        "target_source_category",
+        "target_timestamp",
+        "history_length",
+        "target_rating",
+        "target_verified_purchase",
+        "target_helpful_vote",
+        "source_count",
+        "union_score",
+        "candidate_sources",
+        "from_injected_positive",
+    ]
+    for source_name in ["cooccurrence", "latent_cf", "content_based", "two_tower", "popularity"]:
+        ordered.extend([f"from_{source_name}", f"score_{source_name}", f"rank_{source_name}"])
+    return metadata[ordered]
+
+
 def _build_ranker_payload(
     prepared: PreparedArtifacts,
     split_artifacts: SplitArtifacts,
@@ -4395,20 +4507,7 @@ def _build_ranker_payload(
     candidates: pd.DataFrame,
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray], np.ndarray]:
     if candidates.empty:
-        empty_metadata = pd.DataFrame(
-            columns=[
-                "example_id",
-                "split",
-                "user_id",
-                "user_idx",
-                "item_idx",
-                "item_category_idx",
-                "retrieval_score",
-                "rank",
-                "label",
-                "target_item_idx",
-            ]
-        )
+        empty_metadata = _ranker_metadata_frame(candidates)
         embed_dim = prepared.config.retriever_embedding_dim
         empty_features = {
             "user_idx": np.zeros((0,), dtype=np.int32),
@@ -4560,20 +4659,7 @@ def _build_ranker_payload(
             ).reshape(-1, 1),
         ]
     )
-    metadata = candidates[
-        [
-            "example_id",
-            "split",
-            "user_id",
-            "user_idx",
-            "item_idx",
-            "retrieval_score",
-            "rank",
-            "label",
-            "target_item_idx",
-        ]
-    ].copy()
-    metadata["item_category_idx"] = item_category_idx
+    metadata = _ranker_metadata_frame(candidates, item_category_idx)
     features = {
         "user_idx": metadata["user_idx"].to_numpy(dtype=np.int32),
         "item_idx": item_indices,
@@ -4901,6 +4987,316 @@ def _xgboost_ranker_frame(
     return metadata, feature_frame, labels.reshape(-1).astype(np.int32), grouped.astype(int).tolist()
 
 
+def _numeric_metadata_series(metadata: pd.DataFrame, column: str, default: float = 0.0) -> pd.Series:
+    if column in metadata.columns:
+        return pd.to_numeric(metadata[column], errors="coerce").fillna(default)
+    return pd.Series(default, index=metadata.index, dtype=float)
+
+
+def _ranker_sample_weights(metadata: pd.DataFrame, config: PipelineConfig) -> np.ndarray:
+    weights = np.ones(len(metadata), dtype=np.float32)
+    if metadata.empty or not config.ranker_label_weighting_enabled:
+        return weights
+
+    labels = _numeric_metadata_series(metadata, "label", 0.0).to_numpy(dtype=np.float32)
+    positive_mask = labels > 0.0
+    if not positive_mask.any():
+        return weights
+
+    ratings = _numeric_metadata_series(metadata, "target_rating", 0.0).to_numpy(dtype=np.float32)
+    verified = _numeric_metadata_series(metadata, "target_verified_purchase", 0.0).to_numpy(dtype=np.float32)
+    helpful_votes = _numeric_metadata_series(metadata, "target_helpful_vote", 0.0).to_numpy(dtype=np.float32)
+
+    weights[positive_mask & (ratings >= 5.0)] *= float(config.ranker_positive_rating5_weight)
+    weights[positive_mask & (verified > 0.0)] *= float(config.ranker_verified_positive_weight)
+    weights[positive_mask & (helpful_votes > 0.0)] *= float(config.ranker_helpful_positive_weight)
+
+    if "target_timestamp" in metadata.columns:
+        timestamps = pd.to_datetime(metadata["target_timestamp"], utc=True, errors="coerce")
+        if timestamps.notna().any():
+            max_timestamp = timestamps.max()
+            recent_window = pd.Timedelta(days=int(config.ranker_recent_positive_days))
+            recent_mask = ((max_timestamp - timestamps) <= recent_window).fillna(False).to_numpy(dtype=bool)
+            weights[positive_mask & recent_mask] *= float(config.ranker_recent_positive_weight)
+    return weights
+
+
+def _ranker_group_sample_weights(row_weights: np.ndarray, group: list[int]) -> np.ndarray:
+    group_weights: list[float] = []
+    offset = 0
+    for group_size in group:
+        size = max(int(group_size), 0)
+        values = row_weights[offset:offset + size]
+        group_weights.append(float(np.max(values)) if len(values) else 1.0)
+        offset += size
+    return np.asarray(group_weights, dtype=np.float32)
+
+
+def _is_xgboost_ranker_group_weight_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "size of weight must equal to the number of query groups" in message or "weights_.size() == n_groups" in message
+
+
+RANKER_SOURCE_NAMES: tuple[str, ...] = ("cooccurrence", "latent_cf", "content_based", "two_tower", "popularity")
+
+
+def _candidate_sources_from_row(row: pd.Series) -> str:
+    def _flag(column: str) -> int:
+        value = pd.to_numeric(pd.Series([row.get(column, 0)]), errors="coerce").fillna(0).iloc[0]
+        return int(value)
+
+    sources = [
+        source_name
+        for source_name in RANKER_SOURCE_NAMES
+        if _flag(f"from_{source_name}") == 1
+    ]
+    if _flag("from_injected_positive") == 1:
+        sources.append("injected_positive")
+    if not sources and "source" in row.index and pd.notna(row["source"]):
+        sources.append(str(row["source"]))
+    return " + ".join(sources) if sources else "unknown"
+
+
+def _ranker_demotion_bucket(ranker_candidate_rank: object, final_rank: object) -> str:
+    if pd.isna(ranker_candidate_rank):
+        return "lost"
+    if pd.isna(final_rank):
+        return "demoted_top100"
+    candidate_rank = int(ranker_candidate_rank)
+    final_rank_value = int(final_rank)
+    if final_rank_value > 100:
+        return "demoted_top100"
+    if final_rank_value > 50:
+        return "demoted_top50"
+    if final_rank_value > 10 or final_rank_value > candidate_rank:
+        return "demoted_top10"
+    return "preserved"
+
+
+def _ranker_demotion_columns() -> list[str]:
+    columns = [
+        "split",
+        "variant",
+        "example_id",
+        "target_item_idx",
+        "target_source_category",
+        "history_length_bucket",
+        "candidate_union_rank",
+        "ranker_candidate_rank",
+        "final_rank",
+        "rank_delta",
+        "ranker_score",
+        "candidate_sources",
+        "demotion_bucket",
+    ]
+    columns.extend([f"from_{source_name}" for source_name in RANKER_SOURCE_NAMES])
+    return columns
+
+
+def ranker_demotion_diagnostics(
+    candidate_union: pd.DataFrame,
+    ranker_candidates: pd.DataFrame,
+    ranked_candidates: pd.DataFrame,
+    *,
+    split: str,
+    variant: str,
+) -> pd.DataFrame:
+    columns = _ranker_demotion_columns()
+    if candidate_union.empty or "label" not in candidate_union.columns:
+        return pd.DataFrame(columns=columns)
+
+    union_positive = candidate_union[candidate_union["label"].fillna(0).astype(int) == 1].copy()
+    if union_positive.empty:
+        return pd.DataFrame(columns=columns)
+    union_positive = union_positive.sort_values(["example_id", "rank"]).drop_duplicates(["example_id", "item_idx"], keep="first")
+    union_positive = union_positive.rename(columns={"rank": "candidate_union_rank"})
+    union_positive["candidate_sources"] = union_positive.apply(_candidate_sources_from_row, axis=1)
+    if "history_length" in union_positive.columns:
+        union_positive["history_length_bucket"] = union_positive["history_length"].map(_history_length_bucket)
+    else:
+        union_positive["history_length_bucket"] = "unknown"
+    for source_name in RANKER_SOURCE_NAMES:
+        flag_col = f"from_{source_name}"
+        if flag_col not in union_positive.columns:
+            union_positive[flag_col] = 0
+        union_positive[flag_col] = pd.to_numeric(union_positive[flag_col], errors="coerce").fillna(0).astype(int)
+
+    ranker_lookup = pd.DataFrame(columns=["example_id", "item_idx", "ranker_candidate_rank"])
+    if not ranker_candidates.empty and {"example_id", "item_idx"}.issubset(ranker_candidates.columns):
+        ranker_ordered = ranker_candidates.sort_values(["example_id", "rank"]).copy()
+        ranker_ordered["ranker_candidate_rank"] = ranker_ordered.groupby("example_id", sort=False).cumcount() + 1
+        ranker_lookup = ranker_ordered[["example_id", "item_idx", "ranker_candidate_rank"]].drop_duplicates(["example_id", "item_idx"])
+
+    final_lookup = pd.DataFrame(columns=["example_id", "item_idx", "final_rank", "ranker_score"])
+    if not ranked_candidates.empty and {"example_id", "item_idx", "rank"}.issubset(ranked_candidates.columns):
+        final_columns = ["example_id", "item_idx", "rank"]
+        if "ranker_score" in ranked_candidates.columns:
+            final_columns.append("ranker_score")
+        final_lookup = ranked_candidates[final_columns].copy().rename(columns={"rank": "final_rank"})
+        if "ranker_score" not in final_lookup.columns:
+            final_lookup["ranker_score"] = np.nan
+        final_lookup = final_lookup.drop_duplicates(["example_id", "item_idx"])
+
+    diagnostics = union_positive.merge(ranker_lookup, on=["example_id", "item_idx"], how="left")
+    diagnostics = diagnostics.merge(final_lookup, on=["example_id", "item_idx"], how="left")
+    diagnostics["split"] = split
+    diagnostics["variant"] = variant
+    diagnostics["rank_delta"] = diagnostics["final_rank"] - diagnostics["ranker_candidate_rank"]
+    diagnostics["demotion_bucket"] = [
+        _ranker_demotion_bucket(ranker_rank, final_rank)
+        for ranker_rank, final_rank in zip(diagnostics["ranker_candidate_rank"], diagnostics["final_rank"])
+    ]
+    if "target_source_category" not in diagnostics.columns:
+        diagnostics["target_source_category"] = ""
+    selected = diagnostics.copy()
+    if "target_item_idx" not in selected.columns and "item_idx" in selected.columns:
+        selected["target_item_idx"] = selected["item_idx"]
+    return selected.reindex(columns=columns)
+
+
+def ranker_demotion_summary(diagnostics: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "split",
+        "variant",
+        "source",
+        "target_source_category",
+        "history_length_bucket",
+        "demotion_bucket",
+        "recovered_positives",
+        "examples",
+        "median_candidate_union_rank",
+        "median_ranker_candidate_rank",
+        "median_final_rank",
+        "mean_rank_delta",
+        "mean_ranker_score",
+    ]
+    if diagnostics.empty:
+        return pd.DataFrame(columns=columns)
+    exploded = diagnostics.copy()
+    exploded["source"] = exploded["candidate_sources"].fillna("unknown").astype(str).str.split(r"\s+\+\s+")
+    exploded = exploded.explode("source")
+    exploded["source"] = exploded["source"].replace("", "unknown").fillna("unknown")
+    summary = (
+        exploded.groupby(
+            ["split", "variant", "source", "target_source_category", "history_length_bucket", "demotion_bucket"],
+            dropna=False,
+        )
+        .agg(
+            recovered_positives=("example_id", "size"),
+            examples=("example_id", "nunique"),
+            median_candidate_union_rank=("candidate_union_rank", "median"),
+            median_ranker_candidate_rank=("ranker_candidate_rank", "median"),
+            median_final_rank=("final_rank", "median"),
+            mean_rank_delta=("rank_delta", "mean"),
+            mean_ranker_score=("ranker_score", "mean"),
+        )
+        .reset_index()
+    )
+    return summary.reindex(columns=columns)
+
+
+def _ranker_feature_ablation_groups(config: PipelineConfig) -> dict[str, list[str]]:
+    available = set(_ranker_dense_feature_columns(config)) | {"item_category_idx", "rank"}
+    groups = {
+        "retrieval_scores": ["retrieval_score", "cosine_similarity", "union_score"],
+        "source_flags_ranks": [
+            "source_count",
+            *[
+                column
+                for source_name in RANKER_SOURCE_NAMES
+                for column in (f"from_{source_name}", f"score_{source_name}", f"rank_{source_name}")
+            ],
+        ],
+        "user_preference_features": [
+            *[f"pref_{category}" for category in config.categories],
+            "category_preference_alignment",
+        ],
+        "item_metadata": [
+            "item_category_idx",
+            "price",
+            "average_rating",
+            "log_rating_number",
+            "log_positive_count",
+            "verified_purchase_rate_item",
+            "helpful_vote_mean",
+            "helpful_nonzero_rate",
+            "days_since_last_interaction",
+        ],
+        "history_profile": [
+            "history_item_count",
+            "user_interaction_count",
+            "user_mean_rating",
+            "user_verified_rate",
+            "days_since_last",
+            "avg_days_between",
+            "history_item_text_similarity",
+            "price_delta_vs_history",
+            "rating_delta_vs_history",
+        ],
+        "hard_negative_signal": ["explicit_hard_negative"],
+    }
+    return {name: [column for column in columns if column in available] for name, columns in groups.items()}
+
+
+def _neutral_ranker_feature_value(column: str, values: pd.Series) -> float:
+    numeric = pd.to_numeric(values, errors="coerce")
+    if column.startswith("from_") or column in {"source_count", "explicit_hard_negative"}:
+        return 0.0
+    if column.startswith("score_") or column in {
+        "retrieval_score",
+        "cosine_similarity",
+        "union_score",
+        "category_preference_alignment",
+    }:
+        return 0.0
+    if column.startswith("pref_"):
+        return 0.0
+    if column.startswith("rank_") or column == "rank":
+        finite = numeric.replace([np.inf, -np.inf], np.nan).dropna()
+        return float(finite.max() + 1.0) if not finite.empty else 0.0
+    median_value = numeric.replace([np.inf, -np.inf], np.nan).median()
+    return float(median_value) if pd.notna(median_value) else 0.0
+
+
+def _mask_ranker_feature_group(feature_frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    masked = feature_frame.copy()
+    for column in columns:
+        if column in masked.columns:
+            masked[column] = _neutral_ranker_feature_value(column, masked[column])
+    return masked
+
+
+def ranker_feature_ablation_metrics(
+    ranker_model: object,
+    feature_frame: pd.DataFrame,
+    ranker_metadata: pd.DataFrame,
+    config: PipelineConfig,
+    *,
+    split: str,
+    variant: str,
+) -> pd.DataFrame:
+    columns = ["K", "recall", "mrr", "ndcg", "split", "variant", "ablation_group", "masked_feature_count"]
+    if feature_frame.empty or ranker_metadata.empty:
+        return pd.DataFrame(columns=columns)
+    frames: list[pd.DataFrame] = []
+    groups = {"baseline": [], **_ranker_feature_ablation_groups(config)}
+    for group_name, feature_columns in groups.items():
+        scoring_frame = feature_frame if not feature_columns else _mask_ranker_feature_group(feature_frame, feature_columns)
+        ranked = ranker_metadata.copy()
+        ranked["ranker_score"] = np.asarray(ranker_model.predict(scoring_frame)).reshape(-1)
+        ranked = ranked.sort_values(["example_id", "ranker_score"], ascending=[True, False]).copy()
+        ranked["rank"] = ranked.groupby("example_id").cumcount() + 1
+        metrics = _metrics_from_ranked_candidates(ranked.rename(columns={"ranker_score": "retrieval_score"}), ks=(10, 50, 100))
+        metrics["split"] = split
+        metrics["variant"] = variant
+        metrics["ablation_group"] = group_name
+        metrics["masked_feature_count"] = len([column for column in feature_columns if column in feature_frame.columns])
+        frames.append(metrics)
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(frames, ignore_index=True).reindex(columns=columns)
+
+
 def evaluate_ranker(
     prepared: PreparedArtifacts,
     split_artifacts: SplitArtifacts,
@@ -4914,6 +5310,8 @@ def evaluate_ranker(
     candidate_recovery_frames: list[pd.DataFrame] = []
     candidate_quota_frames: list[pd.DataFrame] = []
     served_distribution_frames: list[pd.DataFrame] = []
+    ranker_demotion_frames: list[pd.DataFrame] = []
+    feature_ablation_frames: list[pd.DataFrame] = []
     for split_name, examples in [("val", split_artifacts.val_examples), ("test", split_artifacts.test_examples)]:
         eval_examples = examples
         eval_cap = prepared.config.ranker_val_example_cap if prepared.config.ranker_val_example_cap is not None else prepared.config.eval_user_cap
@@ -4921,6 +5319,7 @@ def evaluate_ranker(
             eval_examples = eval_examples.sample(n=eval_cap, random_state=prepared.config.seed).sort_values("example_id")
         LOGGER.info("Evaluating ranker on %s split: examples=%s", split_name, f"{len(eval_examples):,}")
         variant = "hybrid_union" if isinstance(retrievers, dict) else embedding_retriever.variant
+        union_frame_for_demotion: pd.DataFrame | None = None
         if isinstance(retrievers, dict):
             union_frame = _candidate_union_for_examples(
                 prepared,
@@ -4929,6 +5328,7 @@ def evaluate_ranker(
                 eval_examples,
                 inject_target_if_missing=False,
             )
+            union_frame_for_demotion = union_frame
             union_with_context = _add_candidate_item_context(prepared, union_frame)
             union_diagnostics = candidate_recall_diagnostics(
                 union_with_context,
@@ -4982,6 +5382,16 @@ def evaluate_ranker(
         if backend == "xgboost":
             ranker_metadata, feature_frame, _, _ = _xgboost_ranker_frame(prepared, split_artifacts, embedding_retriever, candidate_frame)
             ranker_metadata["ranker_score"] = ranker_model.predict(feature_frame).reshape(-1)
+            feature_ablation_frames.append(
+                ranker_feature_ablation_metrics(
+                    ranker_model,
+                    feature_frame,
+                    ranker_metadata,
+                    prepared.config,
+                    split=split_name,
+                    variant=variant,
+                )
+            )
             del feature_frame
         else:
             ranker_metadata, features, _ = _build_ranker_payload(prepared, split_artifacts, embedding_retriever, candidate_frame)
@@ -4989,6 +5399,15 @@ def evaluate_ranker(
             del features
         ranked = ranker_metadata.sort_values(["example_id", "ranker_score"], ascending=[True, False]).copy()
         ranked["rank"] = ranked.groupby("example_id").cumcount() + 1
+        ranker_demotion_frames.append(
+            ranker_demotion_diagnostics(
+                union_frame_for_demotion if union_frame_for_demotion is not None else candidate_frame,
+                candidate_frame,
+                ranked,
+                split=split_name,
+                variant=variant,
+            )
+        )
         ranked_with_context = _add_candidate_item_context(prepared, ranked)
         served_distribution_frames.append(
             candidate_distribution_by_category_price(
@@ -5024,6 +5443,7 @@ def evaluate_ranker(
         del ranker_metadata
         del ranked
         del ranked_with_context
+        del union_frame_for_demotion
         gc.collect()
     if union_diagnostic_frames:
         union_diagnostics = pd.concat(union_diagnostic_frames, ignore_index=True)
@@ -5048,6 +5468,13 @@ def evaluate_ranker(
     elif candidate_quota_frames:
         candidate_quota = pd.concat(candidate_quota_frames, ignore_index=True)
         candidate_quota.to_csv(prepared.config.eval_dir / "candidate_source_quota_diagnostics.csv", index=False)
+    if ranker_demotion_frames:
+        ranker_demotion = pd.concat(ranker_demotion_frames, ignore_index=True)
+        ranker_demotion.to_csv(prepared.config.eval_dir / "ranker_demotion_diagnostics.csv", index=False)
+        ranker_demotion_summary(ranker_demotion).to_csv(prepared.config.eval_dir / "ranker_demotion_summary.csv", index=False)
+    if feature_ablation_frames:
+        feature_ablation = pd.concat(feature_ablation_frames, ignore_index=True)
+        feature_ablation.to_csv(prepared.config.eval_dir / "ranker_feature_ablation_metrics.csv", index=False)
     if not rows:
         return _normalize_metrics_frame(None, extra_columns=("split", "variant", "stage"))
     return pd.concat(rows, ignore_index=True)
@@ -5111,10 +5538,14 @@ def train_ranker(
     if backend == "xgboost":
         if xgb is None:
             raise ImportError("xgboost is required for backend='xgboost' but is not installed.")
-        _, train_frame, train_labels, train_group = _xgboost_ranker_frame(prepared, split_artifacts, embedding_retriever, train_candidates)
-        _, val_frame, val_labels, val_group = _xgboost_ranker_frame(prepared, split_artifacts, embedding_retriever, val_candidates)
+        train_metadata, train_frame, train_labels, train_group = _xgboost_ranker_frame(prepared, split_artifacts, embedding_retriever, train_candidates)
+        val_metadata, val_frame, val_labels, val_group = _xgboost_ranker_frame(prepared, split_artifacts, embedding_retriever, val_candidates)
+        train_sample_weight = _ranker_sample_weights(train_metadata, config)
+        val_sample_weight = _ranker_sample_weights(val_metadata, config)
         del train_candidates
         del val_candidates
+        del train_metadata
+        del val_metadata
         gc.collect()
         model = xgb.XGBRanker(
             objective="rank:ndcg",
@@ -5140,26 +5571,52 @@ def train_ranker(
             "eval_group": [val_group],
             "verbose": bool(config.training_verbose),
         }
+        if config.ranker_label_weighting_enabled:
+            fit_kwargs["sample_weight"] = train_sample_weight
+            fit_kwargs["sample_weight_eval_set"] = [val_sample_weight]
         if config.xgb_early_stopping_rounds is not None:
             fit_kwargs["early_stopping_rounds"] = int(config.xgb_early_stopping_rounds)
-        try:
-            model.fit(train_frame, train_labels, **fit_kwargs)
-        except TypeError as exc:
-            if "early_stopping_rounds" not in fit_kwargs:
+        fallback_fit_keys = ["early_stopping_rounds", "sample_weight_eval_set", "sample_weight"]
+        retried_with_group_weights = False
+        while True:
+            try:
+                model.fit(train_frame, train_labels, **fit_kwargs)
+                break
+            except TypeError as exc:
+                removed_key = next((key for key in fallback_fit_keys if key in fit_kwargs), None)
+                if removed_key is None:
+                    raise
+                LOGGER.warning(
+                    "Installed XGBoost does not accept %s in fit(); retrying without it (%s).",
+                    removed_key,
+                    exc,
+                )
+                fit_kwargs.pop(removed_key, None)
+            except Exception as exc:
+                if (
+                    config.ranker_label_weighting_enabled
+                    and not retried_with_group_weights
+                    and "sample_weight" in fit_kwargs
+                    and _is_xgboost_ranker_group_weight_error(exc)
+                ):
+                    LOGGER.warning(
+                        "Installed XGBoost expects group-level weights for ranking; collapsing row-level ranker weights to query-group weights (%s).",
+                        exc,
+                    )
+                    fit_kwargs["sample_weight"] = _ranker_group_sample_weights(train_sample_weight, train_group)
+                    fit_kwargs["sample_weight_eval_set"] = [_ranker_group_sample_weights(val_sample_weight, val_group)]
+                    retried_with_group_weights = True
+                    continue
                 raise
-            LOGGER.warning(
-                "Installed XGBoost does not accept early_stopping_rounds in fit(); retrying without early stopping (%s).",
-                exc,
-            )
-            fit_kwargs.pop("early_stopping_rounds", None)
-            model.fit(train_frame, train_labels, **fit_kwargs)
         history = model.evals_result()
         del train_frame
         del train_labels
         del train_group
+        del train_sample_weight
         del val_frame
         del val_labels
         del val_group
+        del val_sample_weight
         gc.collect()
         model_path = config.model_dir / "hybrid_union_xgboost_ranker.json"
         model.save_model(model_path)
@@ -5475,6 +5932,9 @@ def _build_inference_request_context(
                 "target_parent_asin": prepared.item_idx_to_id[target_item_idx],
                 "target_source_category": normalized_context_category or target_source_category,
                 "target_timestamp": pd.Timestamp.utcnow(),
+                "target_rating": 0.0,
+                "target_verified_purchase": 0,
+                "target_helpful_vote": 0.0,
                 **prefix_features,
             }
         ]
@@ -5551,11 +6011,14 @@ def _finalize_recommendation_output(
         .merge(_recommendation_item_metadata(prepared), on="item_idx", how="left")
     )
     if include_candidate_sources and "candidate_sources" in candidates.columns:
+        output = output.drop(columns=["candidate_sources"], errors="ignore")
         output = output.merge(
             candidates[["item_idx", "candidate_sources"]].drop_duplicates("item_idx"),
             on="item_idx",
             how="left",
         )
+    elif include_candidate_sources and "candidate_sources" not in output.columns:
+        output["candidate_sources"] = ""
     columns = ["parent_asin", "title", "source_category", "price", "average_rating"]
     if include_candidate_sources:
         columns.append("candidate_sources")
@@ -5724,6 +6187,12 @@ def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
             {"name": "ranker_negatives_per_positive", "value": config.ranker_negatives_per_positive},
             {"name": "ranker_batch_size", "value": config.ranker_batch_size},
             {"name": "ranker_backend", "value": config.ranker_backend},
+            {"name": "ranker_label_weighting_enabled", "value": config.ranker_label_weighting_enabled},
+            {"name": "ranker_positive_rating5_weight", "value": config.ranker_positive_rating5_weight},
+            {"name": "ranker_verified_positive_weight", "value": config.ranker_verified_positive_weight},
+            {"name": "ranker_helpful_positive_weight", "value": config.ranker_helpful_positive_weight},
+            {"name": "ranker_recent_positive_weight", "value": config.ranker_recent_positive_weight},
+            {"name": "ranker_recent_positive_days", "value": config.ranker_recent_positive_days},
             {"name": "latent_cf_components", "value": config.latent_cf_components},
             {"name": "xgb_n_estimators", "value": config.xgb_n_estimators},
             {"name": "xgb_learning_rate", "value": config.xgb_learning_rate},
