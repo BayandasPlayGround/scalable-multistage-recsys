@@ -46,6 +46,7 @@ def recommend(
         items = service.recommend(
             user_id=request.user_id,
             history_items=request.history_items,
+            context_category=request.context_category,
             top_k=request.top_k,
         )
         model = service.get_active_model()

@@ -110,6 +110,8 @@ class PipelineConfig:
     blair_chunk_rows: int = 25_000
     blair_device: str = "auto"
     blair_item_cap: int | None = None
+    blair_state_repair_enabled: bool = True
+    blair_promotion_min_recall_at_100: float = 0.06
     ann_trees: int = 50
     retrieval_top_k: int = 100
     eval_user_cap: int | None = 1_000
@@ -119,8 +121,24 @@ class PipelineConfig:
     neural_candidate_k: int = 150
     popularity_backfill_k: int = 50
     category_backfill_enabled: bool = True
+    category_backfill_global_reserve_fraction: float = 0.20
+    cold_start_context_global_reserve_fraction: float = 0.30
     recency_cooccurrence_enabled: bool = True
     candidate_source_balance_enabled: bool = True
+    candidate_source_weight_cooccurrence: float = 1.15
+    candidate_source_weight_latent_cf: float = 0.60
+    candidate_source_weight_content_based: float = 0.85
+    candidate_source_weight_two_tower: float = 1.10
+    candidate_source_weight_popularity: float = 0.30
+    candidate_quota_cooccurrence: float = 0.40
+    candidate_quota_latent_cf: float = 0.20
+    candidate_quota_content_based: float = 0.25
+    candidate_quota_popularity: float = 0.15
+    candidate_quota_neural_cooccurrence: float = 0.35
+    candidate_quota_neural_latent_cf: float = 0.10
+    candidate_quota_neural_content_based: float = 0.15
+    candidate_quota_neural_two_tower: float = 0.30
+    candidate_quota_neural_popularity: float = 0.10
     vector_retriever_trigger_count: int = 5
     candidate_union_top_k: int = 300
     ranker_candidate_top_k: int = 200
@@ -144,6 +162,7 @@ class PipelineConfig:
     xgb_max_depth: int = 6
     xgb_subsample: float = 0.8
     xgb_colsample_bytree: float = 0.8
+    xgb_early_stopping_rounds: int | None = 25
     metadata_download_if_missing: bool = True
     training_verbose: int = 2
     tf_prefetch_batches: int = 1
@@ -191,6 +210,47 @@ class PipelineConfig:
         self.blair_device = str(self.blair_device).strip().lower()
         if self.blair_item_cap is not None and int(self.blair_item_cap) <= 0:
             raise ValueError("blair_item_cap must be positive when set.")
+        if float(self.blair_promotion_min_recall_at_100) < 0:
+            raise ValueError("blair_promotion_min_recall_at_100 must be non-negative.")
+        reserve_fields = {
+            "category_backfill_global_reserve_fraction": self.category_backfill_global_reserve_fraction,
+            "cold_start_context_global_reserve_fraction": self.cold_start_context_global_reserve_fraction,
+        }
+        for field_name, value in reserve_fields.items():
+            if not 0 <= float(value) < 1:
+                raise ValueError(f"{field_name} must be in the interval [0, 1).")
+        source_weight_values = {
+            "candidate_source_weight_cooccurrence": self.candidate_source_weight_cooccurrence,
+            "candidate_source_weight_latent_cf": self.candidate_source_weight_latent_cf,
+            "candidate_source_weight_content_based": self.candidate_source_weight_content_based,
+            "candidate_source_weight_two_tower": self.candidate_source_weight_two_tower,
+            "candidate_source_weight_popularity": self.candidate_source_weight_popularity,
+        }
+        for field_name, value in source_weight_values.items():
+            if float(value) < 0:
+                raise ValueError(f"{field_name} must be non-negative.")
+        quota_sets = {
+            "candidate_quota": (
+                self.candidate_quota_cooccurrence,
+                self.candidate_quota_latent_cf,
+                self.candidate_quota_content_based,
+                self.candidate_quota_popularity,
+            ),
+            "candidate_quota_neural": (
+                self.candidate_quota_neural_cooccurrence,
+                self.candidate_quota_neural_latent_cf,
+                self.candidate_quota_neural_content_based,
+                self.candidate_quota_neural_two_tower,
+                self.candidate_quota_neural_popularity,
+            ),
+        }
+        for field_name, values in quota_sets.items():
+            if any(float(value) < 0 for value in values):
+                raise ValueError(f"{field_name} values must be non-negative.")
+            if sum(float(value) for value in values) <= 0:
+                raise ValueError(f"{field_name} values must include at least one positive value.")
+        if self.xgb_early_stopping_rounds is not None and int(self.xgb_early_stopping_rounds) <= 0:
+            raise ValueError("xgb_early_stopping_rounds must be positive when set.")
         if self.min_free_disk_gb is not None and float(self.min_free_disk_gb) < 0:
             raise ValueError("min_free_disk_gb must be non-negative.")
 
@@ -376,15 +436,16 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "candidate_source_balance_enabled": True,
             "vector_retriever_trigger_count": 5,
             "eval_user_cap": 2_000,
-            "candidate_union_top_k": 500,
+            "candidate_union_top_k": 750,
             "candidate_union_batch_size": 500,
-            "cooccurrence_candidate_k": 250,
-            "latent_cf_candidate_k": 250,
-            "content_candidate_k": 250,
-            "popularity_backfill_k": 100,
-            "ranker_candidate_top_k": 200,
+            "cooccurrence_candidate_k": 300,
+            "latent_cf_candidate_k": 200,
+            "content_candidate_k": 300,
+            "popularity_backfill_k": 150,
+            "ranker_candidate_top_k": 300,
             "ranker_train_example_cap": 5_000,
-            "ranker_val_example_cap": 1_000,
+            "ranker_val_example_cap": 2_000,
+            "ranker_hardneg_mix": "0.45,0.35,0.20",
             "split_eval_example_cap": 2_000,
         },
         "medium-neural": {
@@ -397,18 +458,19 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "recency_cooccurrence_enabled": True,
             "candidate_source_balance_enabled": True,
             "vector_retriever_trigger_count": 5,
-            "eval_user_cap": 1_000,
-            "candidate_union_top_k": 500,
+            "eval_user_cap": 2_000,
+            "candidate_union_top_k": 750,
             "candidate_union_batch_size": 500,
-            "cooccurrence_candidate_k": 200,
-            "latent_cf_candidate_k": 200,
-            "content_candidate_k": 200,
-            "neural_candidate_k": 200,
-            "popularity_backfill_k": 100,
-            "ranker_candidate_top_k": 150,
+            "cooccurrence_candidate_k": 300,
+            "latent_cf_candidate_k": 150,
+            "content_candidate_k": 250,
+            "neural_candidate_k": 300,
+            "popularity_backfill_k": 150,
+            "ranker_candidate_top_k": 250,
             "ranker_train_example_cap": 5_000,
-            "ranker_val_example_cap": 500,
-            "split_eval_example_cap": 1_000,
+            "ranker_val_example_cap": 1_000,
+            "ranker_hardneg_mix": "0.45,0.35,0.20",
+            "split_eval_example_cap": 2_000,
             "blair_item_cap": 250_000,
         },
         "quality-neural": {
@@ -422,16 +484,17 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "candidate_source_balance_enabled": True,
             "vector_retriever_trigger_count": 5,
             "eval_user_cap": 2_000,
-            "candidate_union_top_k": 650,
+            "candidate_union_top_k": 1_000,
             "candidate_union_batch_size": 500,
-            "cooccurrence_candidate_k": 250,
-            "latent_cf_candidate_k": 250,
-            "content_candidate_k": 250,
-            "neural_candidate_k": 250,
-            "popularity_backfill_k": 100,
-            "ranker_candidate_top_k": 250,
+            "cooccurrence_candidate_k": 400,
+            "latent_cf_candidate_k": 150,
+            "content_candidate_k": 300,
+            "neural_candidate_k": 400,
+            "popularity_backfill_k": 150,
+            "ranker_candidate_top_k": 400,
             "ranker_train_example_cap": 10_000,
-            "ranker_val_example_cap": 1_000,
+            "ranker_val_example_cap": 2_000,
+            "ranker_hardneg_mix": "0.45,0.35,0.20",
             "split_eval_example_cap": 2_000,
         },
         "full": {
@@ -445,16 +508,17 @@ def apply_run_profile(config: PipelineConfig) -> PipelineConfig:
             "candidate_source_balance_enabled": True,
             "vector_retriever_trigger_count": 5,
             "eval_user_cap": None,
-            "candidate_union_top_k": 650,
+            "candidate_union_top_k": 1_000,
             "candidate_union_batch_size": 1_000,
-            "cooccurrence_candidate_k": 250,
-            "latent_cf_candidate_k": 250,
-            "content_candidate_k": 250,
-            "neural_candidate_k": 250,
-            "popularity_backfill_k": 100,
-            "ranker_candidate_top_k": 250,
+            "cooccurrence_candidate_k": 400,
+            "latent_cf_candidate_k": 150,
+            "content_candidate_k": 300,
+            "neural_candidate_k": 400,
+            "popularity_backfill_k": 150,
+            "ranker_candidate_top_k": 400,
             "ranker_train_example_cap": 50_000,
             "ranker_val_example_cap": 5_000,
+            "ranker_hardneg_mix": "0.45,0.35,0.20",
             "split_eval_example_cap": None,
         },
     }
@@ -2370,7 +2434,10 @@ def popularity_by_category_candidates(
             if not positive_preferences:
                 positive_preferences = [(category, 1.0) for category in split_artifacts.config.categories]
             preference_total = sum(value for _, value in positive_preferences) or float(len(positive_preferences))
-            global_reserve = min(max(int(round(top_k * 0.20)), 1), max(top_k - len(positive_preferences), 0)) if top_k > 1 else 0
+            reserve_fraction = float(getattr(split_artifacts.config, "category_backfill_global_reserve_fraction", 0.20))
+            if not seen_items and len(positive_preferences) == 1:
+                reserve_fraction = float(getattr(split_artifacts.config, "cold_start_context_global_reserve_fraction", 0.30))
+            global_reserve = min(max(int(round(top_k * reserve_fraction)), 1), max(top_k - len(positive_preferences), 0)) if top_k > 1 else 0
             category_budget = max(top_k - global_reserve, 0)
             raw_allocations = [
                 (category, (value / preference_total) * category_budget)
@@ -3144,15 +3211,16 @@ def train_retrievers(prepared: PreparedArtifacts, split_artifacts: SplitArtifact
             neural_retriever = train_blair_retriever(prepared, split_artifacts)
         else:
             neural_retriever = train_retriever(prepared, split_artifacts, variant=neural_variant)
-        if _retriever_recovers_positives(neural_retriever.metrics):
+        if _retriever_meets_promotion_gate(neural_retriever, prepared.config):
             neural_retriever.metadata["source_alias"] = "two_tower"
             retrievers["two_tower"] = neural_retriever
             LOGGER.info("Neural retriever complete and enabled for candidate union: variant=%s source_alias=two_tower", neural_variant)
         else:
             LOGGER.warning(
-                "Neural retriever completed but recovered no positives in evaluation: variant=%s. "
-                "It will be logged for diagnostics but excluded from candidate union.",
+                "Neural retriever did not meet the promotion gate and will be excluded from candidate union: "
+                "variant=%s min_blair_recall_at_100=%s",
                 neural_variant,
+                prepared.config.blair_promotion_min_recall_at_100,
             )
     else:
         LOGGER.info("Skipping two_tower retriever because enable_neural_retriever is false")
@@ -3165,6 +3233,26 @@ def _retriever_recovers_positives(metrics: pd.DataFrame) -> bool:
     return bool(pd.to_numeric(metrics["recall"], errors="coerce").fillna(0.0).max() > 0.0)
 
 
+def _retriever_meets_promotion_gate(retriever: RetrieverArtifacts, config: PipelineConfig) -> bool:
+    metrics = retriever.metrics
+    if getattr(retriever, "variant", "") != "blair_text":
+        return _retriever_recovers_positives(metrics)
+    threshold = float(config.blair_promotion_min_recall_at_100)
+    if threshold <= 0:
+        return _retriever_recovers_positives(metrics)
+    if metrics.empty or not {"K", "recall"}.issubset(metrics.columns):
+        return False
+    frame = metrics.copy()
+    frame["K"] = pd.to_numeric(frame["K"], errors="coerce")
+    frame["recall"] = pd.to_numeric(frame["recall"], errors="coerce").fillna(0.0)
+    if "split" in frame.columns:
+        frame = frame[frame["split"].astype(str) == "test"]
+    recall_at_100 = frame[frame["K"] == 100]["recall"]
+    if recall_at_100.empty:
+        return bool(frame["recall"].max() >= threshold)
+    return bool(float(recall_at_100.max()) >= threshold)
+
+
 def _candidate_source_budgets(config: PipelineConfig) -> dict[str, int]:
     return {
         "cooccurrence": int(config.cooccurrence_candidate_k),
@@ -3175,13 +3263,23 @@ def _candidate_source_budgets(config: PipelineConfig) -> dict[str, int]:
     }
 
 
+def _candidate_source_weights(config: PipelineConfig) -> dict[str, float]:
+    return {
+        "cooccurrence": float(config.candidate_source_weight_cooccurrence),
+        "latent_cf": float(config.candidate_source_weight_latent_cf),
+        "content_based": float(config.candidate_source_weight_content_based),
+        "two_tower": float(config.candidate_source_weight_two_tower),
+        "popularity": float(config.candidate_source_weight_popularity),
+    }
+
+
 def _neural_retriever_from_map(retrievers: dict[str, RetrieverArtifacts]) -> RetrieverArtifacts | None:
-    for key in ("two_tower", "dat_lite"):
+    for key in ("two_tower", "dat_lite", "blair_text"):
         retriever = retrievers.get(key)
         if retriever is not None:
             return retriever
     for retriever in retrievers.values():
-        if getattr(retriever, "variant", "") in {"two_tower", "dat_lite"}:
+        if getattr(retriever, "variant", "") in {"two_tower", "dat_lite", "blair_text"}:
             return retriever
     return None
 
@@ -3329,31 +3427,64 @@ def _candidate_metadata_from_example(example: pd.Series) -> Record:
     }
 
 
-def _candidate_source_balance_quotas(top_k: int, *, include_neural: bool = False) -> dict[str, int]:
+def _candidate_source_balance_quotas(
+    top_k: int,
+    *,
+    include_neural: bool = False,
+    config: PipelineConfig | None = None,
+) -> dict[str, int]:
+    top_k = max(int(top_k), 0)
     if include_neural:
         fractions = {
-            "cooccurrence": 0.30,
-            "latent_cf": 0.20,
-            "content_based": 0.15,
-            "two_tower": 0.20,
-            "popularity": 0.15,
+            "cooccurrence": float(getattr(config, "candidate_quota_neural_cooccurrence", 0.35)),
+            "latent_cf": float(getattr(config, "candidate_quota_neural_latent_cf", 0.10)),
+            "content_based": float(getattr(config, "candidate_quota_neural_content_based", 0.15)),
+            "two_tower": float(getattr(config, "candidate_quota_neural_two_tower", 0.30)),
+            "popularity": float(getattr(config, "candidate_quota_neural_popularity", 0.10)),
         }
-        source_order = ("cooccurrence", "latent_cf", "content_based", "two_tower", "popularity")
+        source_order = ("cooccurrence", "two_tower", "content_based", "latent_cf", "popularity")
     else:
         fractions = {
-            "cooccurrence": 0.40,
-            "latent_cf": 0.25,
-            "content_based": 0.20,
-            "popularity": 0.15,
+            "cooccurrence": float(getattr(config, "candidate_quota_cooccurrence", 0.40)),
+            "latent_cf": float(getattr(config, "candidate_quota_latent_cf", 0.20)),
+            "content_based": float(getattr(config, "candidate_quota_content_based", 0.25)),
+            "popularity": float(getattr(config, "candidate_quota_popularity", 0.15)),
         }
-        source_order = ("cooccurrence", "latent_cf", "content_based", "popularity")
-    quotas = {source_name: int(math.floor(top_k * fraction)) for source_name, fraction in fractions.items()}
-    remainder = max(top_k - sum(quotas.values()), 0)
-    for source_name in source_order:
-        if remainder <= 0:
-            break
-        quotas[source_name] += 1
-        remainder -= 1
+        source_order = ("cooccurrence", "content_based", "latent_cf", "popularity")
+    positive_sources = [(source_name, max(float(fractions[source_name]), 0.0)) for source_name in source_order]
+    positive_sources = [(source_name, fraction) for source_name, fraction in positive_sources if fraction > 0.0]
+    if top_k <= 0 or not positive_sources:
+        return {source_name: 0 for source_name in source_order}
+    total_fraction = sum(fraction for _, fraction in positive_sources)
+    raw_allocations = {
+        source_name: (fraction / total_fraction) * top_k
+        for source_name, fraction in positive_sources
+    }
+    quotas = {source_name: int(math.floor(raw_allocations.get(source_name, 0.0))) for source_name in source_order}
+    if top_k >= len(positive_sources):
+        for source_name, _ in positive_sources:
+            quotas[source_name] = max(1, quotas[source_name])
+    delta = top_k - sum(quotas.values())
+    if delta > 0:
+        ranked = sorted(
+            positive_sources,
+            key=lambda item: (-(raw_allocations[item[0]] - math.floor(raw_allocations[item[0]])), source_order.index(item[0])),
+        )
+        for index in range(delta):
+            quotas[ranked[index % len(ranked)][0]] += 1
+    elif delta < 0:
+        ranked = sorted(
+            positive_sources,
+            key=lambda item: ((raw_allocations[item[0]] - math.floor(raw_allocations[item[0]])), -source_order.index(item[0])),
+        )
+        remaining = abs(delta)
+        for source_name, _ in ranked:
+            floor_value = 1 if top_k >= len(positive_sources) else 0
+            removable = min(max(quotas[source_name] - floor_value, 0), remaining)
+            quotas[source_name] -= removable
+            remaining -= removable
+            if remaining <= 0:
+                break
     return quotas
 
 
@@ -3382,7 +3513,7 @@ def _select_candidate_union_rows(example_rows: pd.DataFrame, config: PipelineCon
     include_neural = False
     if "from_two_tower" in example_rows.columns:
         include_neural = bool(pd.to_numeric(example_rows["from_two_tower"], errors="coerce").fillna(0).astype(int).sum() > 0)
-    quotas = _candidate_source_balance_quotas(top_k, include_neural=include_neural)
+    quotas = _candidate_source_balance_quotas(top_k, include_neural=include_neural, config=config)
 
     def _selected_source_count(source_name: str) -> int:
         flag_column = f"from_{source_name}"
@@ -3462,13 +3593,7 @@ def generate_candidate_union(
     )
     budgets = _candidate_source_budgets(prepared.config)
     grouped_frames = {name: frame.groupby("example_id", sort=False) for name, frame in source_frames.items()}
-    source_weights = {
-        "cooccurrence": 1.00,
-        "latent_cf": 1.00,
-        "content_based": 0.85,
-        "two_tower": 0.90,
-        "popularity": 0.25,
-    }
+    source_weights = _candidate_source_weights(prepared.config)
     rows: list[Record] = []
     for _, example in examples.iterrows():
         example_id = int(example["example_id"])
@@ -3820,6 +3945,62 @@ def candidate_recall_diagnostics(
     return pd.DataFrame(rows, columns=columns)
 
 
+def candidate_source_quota_diagnostics(
+    candidates: pd.DataFrame,
+    config: PipelineConfig,
+    *,
+    split: str,
+    variant: str,
+    stage: str,
+    scenario: str,
+) -> pd.DataFrame:
+    columns = [
+        "split",
+        "variant",
+        "stage",
+        "scenario",
+        "source",
+        "configured_quota",
+        "examples",
+        "examples_with_source",
+        "candidate_rows",
+        "avg_candidates_per_example",
+        "source_row_share",
+    ]
+    source_names = ["cooccurrence", "latent_cf", "content_based", "two_tower", "popularity"]
+    if candidates.empty or "example_id" not in candidates.columns:
+        return pd.DataFrame(columns=columns)
+    include_neural = "from_two_tower" in candidates.columns and bool(
+        pd.to_numeric(candidates["from_two_tower"], errors="coerce").fillna(0).astype(int).sum() > 0
+    )
+    top_k = int(config.ranker_candidate_top_k if stage == "ranker_candidates" else config.candidate_union_top_k)
+    quotas = _candidate_source_balance_quotas(top_k, include_neural=include_neural, config=config)
+    total_rows = max(int(len(candidates)), 1)
+    total_examples = max(int(candidates["example_id"].nunique()), 1)
+    rows: list[Record] = []
+    for source_name in source_names:
+        flag_col = f"from_{source_name}"
+        if flag_col not in candidates.columns:
+            continue
+        source_candidates = candidates[candidates[flag_col].fillna(0).astype(int) == 1]
+        rows.append(
+            {
+                "split": split,
+                "variant": variant,
+                "stage": stage,
+                "scenario": scenario,
+                "source": source_name,
+                "configured_quota": int(quotas.get(source_name, 0)),
+                "examples": total_examples,
+                "examples_with_source": int(source_candidates["example_id"].nunique()) if not source_candidates.empty else 0,
+                "candidate_rows": int(len(source_candidates)),
+                "avg_candidates_per_example": float(len(source_candidates) / total_examples),
+                "source_row_share": float(len(source_candidates) / total_rows),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
 def _history_length_bucket(value: object) -> str:
     length = int(pd.to_numeric(pd.Series([value]), errors="coerce").fillna(0).iloc[0])
     if length <= 2:
@@ -3968,6 +4149,10 @@ def _candidate_diagnostic_examples(
             item_to_category,
             prepared.config.categories,
         )
+        if scenario == "anonymous_no_history":
+            target_category = str(row.get("target_source_category", ""))
+            if target_category in prepared.config.categories:
+                prefix_features[f"pref_{target_category}"] = 1.0
         updated = {
             **row,
             "user_id": user_id,
@@ -4010,9 +4195,15 @@ def candidate_recall_output_frames(diagnostics: pd.DataFrame) -> dict[str, pd.Da
     }
 
 
-def write_candidate_recall_outputs(eval_dir: Path, diagnostics: pd.DataFrame) -> dict[str, Path]:
+def write_candidate_recall_outputs(
+    eval_dir: Path,
+    diagnostics: pd.DataFrame,
+    source_quota_diagnostics: pd.DataFrame | None = None,
+) -> dict[str, Path]:
     eval_dir.mkdir(parents=True, exist_ok=True)
     output_frames = candidate_recall_output_frames(diagnostics)
+    if source_quota_diagnostics is not None:
+        output_frames["candidate_source_quota_diagnostics"] = source_quota_diagnostics.copy()
     paths: dict[str, Path] = {}
     for stem, frame in output_frames.items():
         path = eval_dir / f"{stem}.csv"
@@ -4044,6 +4235,7 @@ def run_candidate_recovery_diagnostics(
     scenarios: tuple[str, ...] = CANDIDATE_RECOVERY_SCENARIOS,
 ) -> dict[str, object]:
     diagnostics_frames: list[pd.DataFrame] = []
+    quota_diagnostic_frames: list[pd.DataFrame] = []
     total_candidate_rows = 0
     total_ranker_candidate_rows = 0
     for scenario in scenarios:
@@ -4073,6 +4265,16 @@ def run_candidate_recovery_diagnostics(
                 scenario=scenario,
             )
         )
+        quota_diagnostic_frames.append(
+            candidate_source_quota_diagnostics(
+                candidates,
+                prepared.config,
+                split=split,
+                variant="hybrid_union",
+                stage="candidate_union",
+                scenario=scenario,
+            )
+        )
         pruned = _prune_ranker_candidates(candidates, prepared.config)
         total_ranker_candidate_rows += int(len(pruned))
         pruned_with_context = _add_candidate_item_context(prepared, pruned)
@@ -4086,6 +4288,16 @@ def run_candidate_recovery_diagnostics(
                 scenario=scenario,
             )
         )
+        quota_diagnostic_frames.append(
+            candidate_source_quota_diagnostics(
+                pruned,
+                prepared.config,
+                split=split,
+                variant="hybrid_union",
+                stage="ranker_candidates",
+                scenario=scenario,
+            )
+        )
 
     diagnostics = pd.concat(diagnostics_frames, ignore_index=True) if diagnostics_frames else candidate_recall_diagnostics(
         pd.DataFrame(),
@@ -4094,7 +4306,9 @@ def run_candidate_recovery_diagnostics(
         stage="candidate_union",
         bundle_version=bundle_version,
     )
+    quota_diagnostics = pd.concat(quota_diagnostic_frames, ignore_index=True) if quota_diagnostic_frames else pd.DataFrame()
     output_frames = candidate_recall_output_frames(diagnostics)
+    output_frames["candidate_source_quota_diagnostics"] = quota_diagnostics.copy()
     return {
         "bundle_version": bundle_version or "",
         "split": split,
@@ -4102,6 +4316,7 @@ def run_candidate_recovery_diagnostics(
         "candidate_rows": total_candidate_rows,
         "ranker_candidate_rows": total_ranker_candidate_rows,
         "diagnostics": diagnostics,
+        "source_quota_diagnostics": quota_diagnostics,
         "output_frames": output_frames,
     }
 
@@ -4583,9 +4798,12 @@ def _select_embedding_retriever(retrievers: RetrieverArtifacts | dict[str, Retri
     for retriever in retrievers.values():
         if getattr(retriever, "variant", "") == "dat_lite":
             return retriever
-    for key in ["dat_lite", "two_tower", "latent_cf", "content_based"]:
+    for key in ["dat_lite", "two_tower", "blair_text", "latent_cf", "content_based"]:
         if key in retrievers:
             return retrievers[key]
+    for retriever in retrievers.values():
+        if getattr(retriever, "variant", "") == "blair_text":
+            return retriever
     return next(iter(retrievers.values()))
 
 
@@ -4694,6 +4912,7 @@ def evaluate_ranker(
     rows: list[pd.DataFrame] = []
     union_diagnostic_frames: list[pd.DataFrame] = []
     candidate_recovery_frames: list[pd.DataFrame] = []
+    candidate_quota_frames: list[pd.DataFrame] = []
     served_distribution_frames: list[pd.DataFrame] = []
     for split_name, examples in [("val", split_artifacts.val_examples), ("test", split_artifacts.test_examples)]:
         eval_examples = examples
@@ -4720,6 +4939,16 @@ def evaluate_ranker(
             )
             union_diagnostics.to_csv(prepared.config.eval_dir / f"{variant}_{split_name}_candidate_union_diagnostics_metrics.csv", index=False)
             union_diagnostic_frames.append(union_diagnostics)
+            candidate_quota_frames.append(
+                candidate_source_quota_diagnostics(
+                    union_frame,
+                    prepared.config,
+                    split=split_name,
+                    variant=variant,
+                    stage="candidate_union",
+                    scenario="known_user_full_history",
+                )
+            )
             candidate_frame = _prune_ranker_candidates(union_frame, prepared.config)
             del union_frame
             del union_with_context
@@ -4739,6 +4968,17 @@ def evaluate_ranker(
             stage="ranker_candidates",
         )
         diagnostics.to_csv(prepared.config.eval_dir / f"{variant}_{split_name}_candidate_diagnostics_metrics.csv", index=False)
+        if isinstance(retrievers, dict):
+            candidate_quota_frames.append(
+                candidate_source_quota_diagnostics(
+                    candidate_frame,
+                    prepared.config,
+                    split=split_name,
+                    variant=variant,
+                    stage="ranker_candidates",
+                    scenario="known_user_full_history",
+                )
+            )
         if backend == "xgboost":
             ranker_metadata, feature_frame, _, _ = _xgboost_ranker_frame(prepared, split_artifacts, embedding_retriever, candidate_frame)
             ranker_metadata["ranker_score"] = ranker_model.predict(feature_frame).reshape(-1)
@@ -4773,6 +5013,7 @@ def evaluate_ranker(
                 split=split_name,
             )
             candidate_recovery_frames.append(recovery_payload["diagnostics"])
+            candidate_quota_frames.append(recovery_payload["source_quota_diagnostics"])
         atomic_write_parquet(
             prepared.config.eval_dir / f"{metrics.iloc[0]['variant']}_{split_name}_ranked_candidates.parquet",
             ranked_with_context,
@@ -4802,7 +5043,11 @@ def evaluate_ranker(
             served_distribution.to_csv(prepared.config.eval_dir / "served_distribution_by_category_price.csv", index=False)
     if candidate_recovery_frames:
         candidate_recovery = pd.concat(candidate_recovery_frames, ignore_index=True)
-        write_candidate_recall_outputs(Path(prepared.config.eval_dir), candidate_recovery)
+        candidate_quota = pd.concat(candidate_quota_frames, ignore_index=True) if candidate_quota_frames else None
+        write_candidate_recall_outputs(Path(prepared.config.eval_dir), candidate_recovery, candidate_quota)
+    elif candidate_quota_frames:
+        candidate_quota = pd.concat(candidate_quota_frames, ignore_index=True)
+        candidate_quota.to_csv(prepared.config.eval_dir / "candidate_source_quota_diagnostics.csv", index=False)
     if not rows:
         return _normalize_metrics_frame(None, extra_columns=("split", "variant", "stage"))
     return pd.concat(rows, ignore_index=True)
@@ -4873,7 +5118,7 @@ def train_ranker(
         gc.collect()
         model = xgb.XGBRanker(
             objective="rank:ndcg",
-            eval_metric=["ndcg@10", "ndcg@20"],
+            eval_metric=["ndcg@10", "ndcg@50", "ndcg@100"],
             learning_rate=config.xgb_learning_rate,
             n_estimators=config.xgb_n_estimators,
             max_depth=config.xgb_max_depth,
@@ -4889,14 +5134,25 @@ def train_ranker(
             config.xgb_n_estimators,
             config.xgb_max_depth,
         )
-        model.fit(
-            train_frame,
-            train_labels,
-            group=train_group,
-            eval_set=[(val_frame, val_labels)],
-            eval_group=[val_group],
-            verbose=bool(config.training_verbose),
-        )
+        fit_kwargs = {
+            "group": train_group,
+            "eval_set": [(val_frame, val_labels)],
+            "eval_group": [val_group],
+            "verbose": bool(config.training_verbose),
+        }
+        if config.xgb_early_stopping_rounds is not None:
+            fit_kwargs["early_stopping_rounds"] = int(config.xgb_early_stopping_rounds)
+        try:
+            model.fit(train_frame, train_labels, **fit_kwargs)
+        except TypeError as exc:
+            if "early_stopping_rounds" not in fit_kwargs:
+                raise
+            LOGGER.warning(
+                "Installed XGBoost does not accept early_stopping_rounds in fit(); retrying without early stopping (%s).",
+                exc,
+            )
+            fit_kwargs.pop("early_stopping_rounds", None)
+            model.fit(train_frame, train_labels, **fit_kwargs)
         history = model.evals_result()
         del train_frame
         del train_labels
@@ -5112,17 +5368,56 @@ def _resolve_history_item_idxs(
     *,
     user_id: str | None,
     history_items: list[str] | None,
+    require_history: bool = True,
 ) -> list[int]:
-    if user_id is None and not history_items:
+    if user_id is None and not history_items and require_history:
         raise ValueError("Provide either user_id or history_items.")
     resolved_history_items = history_items
     if resolved_history_items is None:
-        history_frame = get_user_order_history(prepared, split_artifacts, str(user_id), split="test", limit=None)
-        resolved_history_items = history_frame["parent_asin"].tolist()
+        if user_id is not None:
+            try:
+                history_frame = get_user_order_history(prepared, split_artifacts, str(user_id), split="test", limit=None)
+            except KeyError:
+                if require_history:
+                    raise
+                resolved_history_items = []
+            else:
+                resolved_history_items = history_frame["parent_asin"].tolist()
+        else:
+            resolved_history_items = []
     history_item_idxs = [prepared.item_id_to_idx[item] for item in resolved_history_items if item in prepared.item_id_to_idx]
-    if not history_item_idxs:
+    if not history_item_idxs and require_history:
         raise ValueError("No usable history items were found in the current item catalog.")
     return history_item_idxs
+
+
+def _normalize_context_category(config: PipelineConfig, context_category: str | None) -> str | None:
+    if context_category is None:
+        return None
+    raw = str(context_category).strip()
+    if not raw:
+        return None
+    aliases = {category: category for category in config.categories}
+    aliases.update({category.replace("_", " "): category for category in config.categories})
+    aliases.update({category.lower(): category for category in config.categories})
+    aliases.update({category.replace("_", " ").lower(): category for category in config.categories})
+    return aliases.get(raw, aliases.get(raw.lower(), raw))
+
+
+def _context_anchor_item_idx(
+    prepared: PreparedArtifacts,
+    split_artifacts: SplitArtifacts,
+    context_category: str | None,
+) -> int:
+    if context_category:
+        category_counter = split_artifacts.category_item_popularity.get(context_category, Counter())
+        for item_idx, _ in category_counter.most_common():
+            return int(item_idx)
+    for item_idx, _ in split_artifacts.train_item_popularity.most_common():
+        return int(item_idx)
+    if prepared.item_idx_to_id:
+        return int(next(iter(prepared.item_idx_to_id)))
+    raise ValueError("Cannot build a recommendation request without catalog items.")
 
 
 def _build_inference_request_context(
@@ -5131,12 +5426,16 @@ def _build_inference_request_context(
     *,
     user_id: str | None,
     history_items: list[str] | None,
+    context_category: str | None = None,
 ) -> InferenceRequestContext:
+    normalized_context_category = _normalize_context_category(prepared.config, context_category)
+    require_history = normalized_context_category is None
     history_item_idxs = _resolve_history_item_idxs(
         prepared,
         split_artifacts,
         user_id=user_id,
         history_items=history_items,
+        require_history=require_history,
     )
     user_identifier = str(user_id or "__cold_start__")
     user_idx = split_artifacts.user_id_to_idx.get(user_identifier, 0)
@@ -5149,13 +5448,22 @@ def _build_inference_request_context(
         }
     )
     item_categories = dict(zip(prepared.item_features["item_idx"], prepared.item_features["source_category"]))
+    target_timestamp = int(prefix_df["timestamp"].max()) + 1 if not prefix_df.empty else 1
     prefix_features = _compute_prefix_features(
         prefix_df.tail(prepared.config.history_len),
-        int(prefix_df["timestamp"].max()) + 1,
+        target_timestamp,
         item_categories,
         prepared.config.categories,
     )
-    target_item_idx = history_item_idxs[-1]
+    if normalized_context_category in prepared.config.categories:
+        for category in prepared.config.categories:
+            prefix_features[f"pref_{category}"] = 1.0 if category == normalized_context_category else 0.0
+    target_item_idx = history_item_idxs[-1] if history_item_idxs else _context_anchor_item_idx(
+        prepared,
+        split_artifacts,
+        normalized_context_category,
+    )
+    target_source_category = str(item_categories.get(target_item_idx, normalized_context_category or ""))
     inference_example = pd.DataFrame(
         [
             {
@@ -5165,7 +5473,7 @@ def _build_inference_request_context(
                 "user_idx": user_idx,
                 "target_item_idx": target_item_idx,
                 "target_parent_asin": prepared.item_idx_to_id[target_item_idx],
-                "target_source_category": str(item_categories.get(target_item_idx, "")),
+                "target_source_category": normalized_context_category or target_source_category,
                 "target_timestamp": pd.Timestamp.utcnow(),
                 **prefix_features,
             }
@@ -5264,6 +5572,7 @@ def recommend_hybrid(
     ranker: RankerArtifacts | None = None,
     user_id: str | None = None,
     history_items: list[str] | None = None,
+    context_category: str | None = None,
     top_k: int = 20,
 ) -> pd.DataFrame:
     request = _build_inference_request_context(
@@ -5271,6 +5580,7 @@ def recommend_hybrid(
         split_artifacts,
         user_id=user_id,
         history_items=history_items,
+        context_category=context_category,
     )
     candidates = generate_candidate_union(
         prepared,
@@ -5305,15 +5615,26 @@ def recommend(
     ranker: RankerArtifacts | None = None,
     user_id: str | None = None,
     history_items: list[str] | None = None,
+    context_category: str | None = None,
     top_k: int = 20,
 ) -> pd.DataFrame:
     if isinstance(retriever, dict):
-        return recommend_hybrid(prepared, split_artifacts, retriever, ranker=ranker, user_id=user_id, history_items=history_items, top_k=top_k)
+        return recommend_hybrid(
+            prepared,
+            split_artifacts,
+            retriever,
+            ranker=ranker,
+            user_id=user_id,
+            history_items=history_items,
+            context_category=context_category,
+            top_k=top_k,
+        )
     request = _build_inference_request_context(
         prepared,
         split_artifacts,
         user_id=user_id,
         history_items=history_items,
+        context_category=context_category,
     )
     candidate_top_k = max(top_k * 5, prepared.config.retrieval_top_k)
     candidates = generate_candidates(prepared, split_artifacts, retriever, request.inference_example, top_k=candidate_top_k)
@@ -5367,6 +5688,8 @@ def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
             {"name": "neural_retriever_variant", "value": config.neural_retriever_variant},
             {"name": "dat_mimic_weight", "value": config.dat_mimic_weight},
             {"name": "dat_category_alignment_weight", "value": config.dat_category_alignment_weight},
+            {"name": "blair_state_repair_enabled", "value": config.blair_state_repair_enabled},
+            {"name": "blair_promotion_min_recall_at_100", "value": config.blair_promotion_min_recall_at_100},
             {"name": "retrieval_top_k", "value": config.retrieval_top_k},
             {"name": "cooccurrence_candidate_k", "value": config.cooccurrence_candidate_k},
             {"name": "latent_cf_candidate_k", "value": config.latent_cf_candidate_k},
@@ -5374,8 +5697,24 @@ def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
             {"name": "neural_candidate_k", "value": config.neural_candidate_k},
             {"name": "popularity_backfill_k", "value": config.popularity_backfill_k},
             {"name": "category_backfill_enabled", "value": config.category_backfill_enabled},
+            {"name": "category_backfill_global_reserve_fraction", "value": config.category_backfill_global_reserve_fraction},
+            {"name": "cold_start_context_global_reserve_fraction", "value": config.cold_start_context_global_reserve_fraction},
             {"name": "recency_cooccurrence_enabled", "value": config.recency_cooccurrence_enabled},
             {"name": "candidate_source_balance_enabled", "value": config.candidate_source_balance_enabled},
+            {"name": "candidate_source_weight_cooccurrence", "value": config.candidate_source_weight_cooccurrence},
+            {"name": "candidate_source_weight_latent_cf", "value": config.candidate_source_weight_latent_cf},
+            {"name": "candidate_source_weight_content_based", "value": config.candidate_source_weight_content_based},
+            {"name": "candidate_source_weight_two_tower", "value": config.candidate_source_weight_two_tower},
+            {"name": "candidate_source_weight_popularity", "value": config.candidate_source_weight_popularity},
+            {"name": "candidate_quota_cooccurrence", "value": config.candidate_quota_cooccurrence},
+            {"name": "candidate_quota_latent_cf", "value": config.candidate_quota_latent_cf},
+            {"name": "candidate_quota_content_based", "value": config.candidate_quota_content_based},
+            {"name": "candidate_quota_popularity", "value": config.candidate_quota_popularity},
+            {"name": "candidate_quota_neural_cooccurrence", "value": config.candidate_quota_neural_cooccurrence},
+            {"name": "candidate_quota_neural_latent_cf", "value": config.candidate_quota_neural_latent_cf},
+            {"name": "candidate_quota_neural_content_based", "value": config.candidate_quota_neural_content_based},
+            {"name": "candidate_quota_neural_two_tower", "value": config.candidate_quota_neural_two_tower},
+            {"name": "candidate_quota_neural_popularity", "value": config.candidate_quota_neural_popularity},
             {"name": "vector_retriever_trigger_count", "value": config.vector_retriever_trigger_count},
             {"name": "candidate_union_top_k", "value": config.candidate_union_top_k},
             {"name": "candidate_union_batch_size", "value": config.candidate_union_batch_size},
@@ -5389,6 +5728,7 @@ def pipeline_summary(config: PipelineConfig) -> pd.DataFrame:
             {"name": "xgb_n_estimators", "value": config.xgb_n_estimators},
             {"name": "xgb_learning_rate", "value": config.xgb_learning_rate},
             {"name": "xgb_max_depth", "value": config.xgb_max_depth},
+            {"name": "xgb_early_stopping_rounds", "value": config.xgb_early_stopping_rounds},
         ]
     )
 

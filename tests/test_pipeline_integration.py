@@ -314,6 +314,21 @@ def test_source_balanced_union_applies_reserved_latent_quota(monkeypatch) -> Non
 
 
 @pytest.mark.retrieval
+def test_recall_first_source_quotas_prioritize_cooccurrence_and_blair() -> None:
+    config = core.PipelineConfig(categories=("Automotive",))
+
+    quotas = core._candidate_source_balance_quotas(100, include_neural=True, config=config)
+
+    assert quotas == {
+        "cooccurrence": 35,
+        "latent_cf": 10,
+        "content_based": 15,
+        "two_tower": 30,
+        "popularity": 10,
+    }
+
+
+@pytest.mark.retrieval
 def test_ranker_candidate_pruning_preserves_reserved_latent_candidates() -> None:
     config = core.PipelineConfig(
         categories=("Automotive",),
@@ -547,6 +562,102 @@ def test_candidate_recovery_diagnostics_do_not_inject_targets(monkeypatch) -> No
 
 
 @pytest.mark.retrieval
+def test_anonymous_no_history_diagnostics_use_target_category_as_context() -> None:
+    config = core.PipelineConfig(categories=("Automotive", "Industrial_and_Scientific"))
+    prepared = SimpleNamespace(
+        config=config,
+        item_features=pd.DataFrame(
+            [
+                {"item_idx": 1, "source_category": "Automotive"},
+                {"item_idx": 2, "source_category": "Industrial_and_Scientific"},
+            ]
+        ),
+    )
+    examples = pd.DataFrame(
+        [
+            {
+                "example_id": 1,
+                "split": "test",
+                "user_id": "u1",
+                "user_idx": 1,
+                "history_item_idxs": [2],
+                "target_item_idx": 1,
+                "target_parent_asin": "A1",
+                "target_timestamp": pd.Timestamp("2026-01-01"),
+                "target_source_category": "Automotive",
+                "history_length": 1,
+                "user_interaction_count": 1.0,
+                "user_mean_rating": 5.0,
+                "user_verified_rate": 1.0,
+                "days_since_last": 1.0,
+                "avg_days_between": 1.0,
+                "pref_Automotive": 0.0,
+                "pref_Industrial_and_Scientific": 1.0,
+            }
+        ]
+    )
+
+    scenario_examples = core._candidate_diagnostic_examples(prepared, examples, "anonymous_no_history")
+
+    assert scenario_examples.iloc[0]["history_length"] == 0
+    assert scenario_examples.iloc[0]["pref_Automotive"] == 1.0
+    assert scenario_examples.iloc[0]["pref_Industrial_and_Scientific"] == 0.0
+
+
+@pytest.mark.retrieval
+def test_contextual_popularity_backfill_blends_category_and_global_items() -> None:
+    config = core.PipelineConfig(
+        categories=("Automotive", "Industrial_and_Scientific"),
+        category_backfill_enabled=True,
+        cold_start_context_global_reserve_fraction=0.30,
+    )
+    split_artifacts = SimpleNamespace(
+        config=config,
+        train_item_popularity=Counter({100: 500, 101: 100, 102: 90, 201: 80, 202: 70}),
+        category_item_popularity={
+            "Automotive": Counter({101: 100, 102: 90, 103: 80, 104: 70, 105: 60, 106: 50, 107: 40}),
+            "Industrial_and_Scientific": Counter({201: 80, 202: 70}),
+        },
+    )
+    examples = pd.DataFrame(
+        [
+            {
+                "example_id": 1,
+                "split": "inference",
+                "user_id": "__cold_start__",
+                "history_item_idxs": [],
+                "target_item_idx": 101,
+                "pref_Automotive": 1.0,
+                "pref_Industrial_and_Scientific": 0.0,
+            }
+        ]
+    )
+
+    candidates = core.popularity_by_category_candidates(split_artifacts, examples, top_k=10)
+
+    assert len(candidates) == 10
+    assert set(candidates["item_idx"]).issuperset({101, 102, 100, 201})
+
+
+@pytest.mark.retrieval
+def test_blair_retriever_requires_recall_gate_for_candidate_union() -> None:
+    config = core.PipelineConfig(blair_promotion_min_recall_at_100=0.06)
+    retriever = SimpleNamespace(
+        variant="blair_text",
+        metrics=pd.DataFrame(
+            [
+                {"split": "test", "K": 100, "recall": 0.02},
+                {"split": "val", "K": 100, "recall": 0.08},
+            ]
+        ),
+    )
+
+    assert core._retriever_meets_promotion_gate(retriever, config) is False
+    retriever.metrics.loc[retriever.metrics["split"] == "test", "recall"] = 0.06
+    assert core._retriever_meets_promotion_gate(retriever, config) is True
+
+
+@pytest.mark.retrieval
 def test_two_tower_vector_serving_query_uses_history_embedding_mean() -> None:
     retriever = SimpleNamespace(
         variant="two_tower",
@@ -608,12 +719,12 @@ def test_quality_profile_raises_debug_sized_candidate_budgets(test_settings, cap
     with caplog.at_level("WARNING"):
         config = pipeline_config_from_settings(settings)
 
-    assert config.candidate_union_top_k == 500
-    assert config.ranker_candidate_top_k == 200
-    assert config.cooccurrence_candidate_k == 250
-    assert config.latent_cf_candidate_k == 250
-    assert config.content_candidate_k == 250
-    assert config.popularity_backfill_k == 100
+    assert config.candidate_union_top_k == 750
+    assert config.ranker_candidate_top_k == 300
+    assert config.cooccurrence_candidate_k == 300
+    assert config.latent_cf_candidate_k == 200
+    assert config.content_candidate_k == 300
+    assert config.popularity_backfill_k == 150
     assert "Candidate budget settings were below the quality profile floor" in caplog.text
 
 
@@ -626,9 +737,9 @@ def test_quality_neural_profile_defaults_to_blair_and_neural_budget_floors(test_
 
     assert config.enable_neural_retriever is True
     assert config.neural_retriever_variant == "blair_text"
-    assert config.candidate_union_top_k == 650
-    assert config.ranker_candidate_top_k == 250
-    assert config.neural_candidate_k == 250
+    assert config.candidate_union_top_k == 1_000
+    assert config.ranker_candidate_top_k == 400
+    assert config.neural_candidate_k == 400
     assert "Candidate budget settings were below the quality-neural profile floor" in caplog.text
 
     override = pipeline_config_from_settings(
@@ -653,8 +764,8 @@ def test_quality_neural_profile_applies_scale_defaults_when_not_explicit(workspa
     assert config.neural_retriever_variant == "blair_text"
     assert config.eval_user_cap == 2_000
     assert config.ranker_train_example_cap == 10_000
-    assert config.candidate_union_top_k == 650
-    assert config.ranker_candidate_top_k == 250
+    assert config.candidate_union_top_k == 1_000
+    assert config.ranker_candidate_top_k == 400
 
 
 @pytest.mark.retrieval
@@ -673,10 +784,10 @@ def test_medium_neural_profile_applies_blair_smaller_defaults(workspace_dir: Pat
     assert config.neural_retriever_variant == "blair_text"
     assert config.max_rows_per_category == 500_000
     assert config.blair_item_cap == 250_000
-    assert config.eval_user_cap == 1_000
+    assert config.eval_user_cap == 2_000
     assert config.ranker_train_example_cap == 5_000
-    assert config.candidate_union_top_k == 500
-    assert config.ranker_candidate_top_k == 150
+    assert config.candidate_union_top_k == 750
+    assert config.ranker_candidate_top_k == 250
 
 
 @pytest.mark.retrieval

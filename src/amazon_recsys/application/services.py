@@ -108,6 +108,7 @@ class BundleRecommendationService:
         *,
         user_id: str | None = None,
         history_items: list[str] | None = None,
+        context_category: str | None = None,
         top_k: int | None = None,
     ) -> list[RecommendationItem]:
         bundle = self._load_bundle()
@@ -116,6 +117,7 @@ class BundleRecommendationService:
             bundle=bundle,
             user_id=user_id,
             history_items=history_items,
+            context_category=context_category,
             top_k=effective_top_k,
         )
         if self.monitoring_service is not None:
@@ -137,6 +139,7 @@ class BundleRecommendationService:
         bundle: RuntimeBundle,
         user_id: str | None = None,
         history_items: list[str] | None = None,
+        context_category: str | None = None,
         top_k: int,
     ) -> list[RecommendationItem]:
         effective_top_k = max(1, int(top_k))
@@ -166,6 +169,7 @@ class BundleRecommendationService:
             ranker=bundle.ranker,
             user_id=user_id,
             history_items=effective_history_items,
+            context_category=context_category,
             top_k=effective_top_k,
         )
         if frame.empty:
@@ -173,6 +177,7 @@ class BundleRecommendationService:
                 bundle=bundle,
                 user_id=user_id,
                 history_items=history_items,
+                context_category=context_category,
                 top_k=effective_top_k,
             )
         else:
@@ -216,6 +221,7 @@ class BundleRecommendationService:
         bundle: RuntimeBundle,
         user_id: str | None,
         history_items: list[str] | None,
+        context_category: str | None,
         top_k: int,
     ) -> list[RecommendationItem]:
         seen_items = set(history_items or [])
@@ -225,11 +231,25 @@ class BundleRecommendationService:
             except KeyError:
                 seen_items = set()
         item_frame = bundle.prepared.item_features.copy()
+        normalized_context = core._normalize_context_category(bundle.prepared.config, context_category)
+        if normalized_context:
+            context_frame = item_frame[item_frame["source_category"].astype(str) == normalized_context].copy()
+        else:
+            context_frame = item_frame.iloc[0:0].copy()
         if "train_positive_count" in item_frame.columns:
             sort_columns = ["train_positive_count", "rating_number"]
         else:
             sort_columns = ["rating_number"]
-        item_frame = item_frame[~item_frame["parent_asin"].isin(seen_items)].sort_values(sort_columns, ascending=False).head(top_k)
+        selected_frames: list[pd.DataFrame] = []
+        selected_ids: set[str] = set(seen_items)
+        if not context_frame.empty:
+            context_top_k = max(1, int(round(top_k * 0.70)))
+            context_frame = context_frame[~context_frame["parent_asin"].isin(selected_ids)].sort_values(sort_columns, ascending=False).head(context_top_k)
+            selected_frames.append(context_frame)
+            selected_ids.update(context_frame["parent_asin"].astype(str).tolist())
+        global_frame = item_frame[~item_frame["parent_asin"].isin(selected_ids)].sort_values(sort_columns, ascending=False).head(top_k)
+        selected_frames.append(global_frame)
+        item_frame = pd.concat(selected_frames, ignore_index=True).drop_duplicates("parent_asin").head(top_k)
         return [
             RecommendationItem(
                 item_id=str(row["parent_asin"]),

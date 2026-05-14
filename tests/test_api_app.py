@@ -22,6 +22,7 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     monitoring_response = client.get("/monitoring/drift/summary")
     favicon_response = client.get("/favicon.ico")
     recommend_response = client.post("/recommend", json={"history_items": ["A1", "A2"], "top_k": 3})
+    context_recommend_response = client.post("/recommend", json={"context_category": "Automotive", "top_k": 2})
     page_response = client.get("/")
     query_page_response = client.get("/?history_items=A1,A2&top_k=3#qa-workspace")
 
@@ -33,6 +34,7 @@ def test_api_endpoints_work_with_mock_bundle(mock_settings) -> None:
     assert monitoring_response.status_code == 503
     assert favicon_response.status_code == 200
     assert recommend_response.status_code == 200
+    assert context_recommend_response.status_code == 200
     assert page_response.status_code == 200
     assert query_page_response.status_code == 200
 

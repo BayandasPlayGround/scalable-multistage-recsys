@@ -21,12 +21,13 @@ class ReadyResponse(BaseModel):
 class RecommendationRequest(BaseModel):
     user_id: str | None = None
     history_items: list[str] | None = None
+    context_category: str | None = None
     top_k: int | None = Field(default=None, ge=1, le=100)
 
     @model_validator(mode="after")
     def validate_inputs(self) -> "RecommendationRequest":
-        if self.user_id is None and not self.history_items:
-            raise ValueError("Provide either user_id or history_items.")
+        if self.user_id is None and not self.history_items and not self.context_category:
+            raise ValueError("Provide user_id, history_items, or context_category.")
         return self
 
 
