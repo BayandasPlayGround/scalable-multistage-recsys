@@ -115,6 +115,7 @@ class RecommendationService(Protocol):
         *,
         user_id: str | None = None,
         history_items: list[str] | None = None,
+        context_category: str | None = None,
         top_k: int | None = None,
     ) -> list[RecommendationItem]: ...
 

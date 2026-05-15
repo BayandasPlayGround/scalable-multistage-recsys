@@ -64,6 +64,9 @@ def test_training_bundle_round_trip(test_container, train_export_activate) -> No
     assert "candidate_union_recall_by_category.csv" in metric_file_names
     assert "candidate_union_recall_by_source.csv" in metric_file_names
     assert "candidate_union_recall_by_history_bucket.csv" in metric_file_names
+    assert "ranker_demotion_diagnostics.csv" in metric_file_names
+    assert "ranker_demotion_summary.csv" in metric_file_names
+    assert "ranker_feature_ablation_metrics.csv" in metric_file_names
     assert "served_distribution_by_category_price.csv" in metric_file_names
 
     client = TestClient(create_app(test_container.settings))
@@ -110,6 +113,239 @@ def test_candidate_recall_diagnostics_break_down_categories_and_sources() -> Non
     assert by_scope[("target_price_bucket", "price_low")]["positive_recoveries"] == 1
     assert by_scope[("candidate_source", "cooccurrence")]["positive_recoveries"] == 1
     assert by_scope[("cold_start_user_type", "anonymous_no_history")]["hit_rate"] == pytest.approx(0.0)
+
+
+@pytest.mark.ranking
+def test_make_splits_includes_target_interaction_signals(workspace_dir: Path) -> None:
+    config = core.PipelineConfig(
+        base_dir=workspace_dir,
+        categories=("Automotive",),
+        k_core=2,
+        history_len=3,
+        metadata_download_if_missing=False,
+    )
+    interactions = pd.DataFrame(
+        [
+            {"user_id": "u1", "parent_asin": "A1", "source_category": "Automotive", "timestamp": 1_700_000_000_000, "rating": 4.0, "verified_purchase": True, "helpful_vote": 0},
+            {"user_id": "u1", "parent_asin": "A2", "source_category": "Automotive", "timestamp": 1_700_000_001_000, "rating": 5.0, "verified_purchase": True, "helpful_vote": 2},
+            {"user_id": "u1", "parent_asin": "A3", "source_category": "Automotive", "timestamp": 1_700_000_002_000, "rating": 3.0, "verified_purchase": False, "helpful_vote": 0},
+            {"user_id": "u1", "parent_asin": "A4", "source_category": "Automotive", "timestamp": 1_700_000_003_000, "rating": 5.0, "verified_purchase": True, "helpful_vote": 5},
+        ]
+    )
+    prepared = core.PreparedArtifacts(
+        config=config,
+        raw_review_stats=pd.DataFrame(),
+        kcore_stats=pd.DataFrame(),
+        interactions=interactions,
+        hard_negatives=pd.DataFrame(columns=["user_id", "timestamp", "parent_asin"]),
+        item_features=pd.DataFrame(
+            [
+                {"parent_asin": "A1", "item_idx": 1, "source_category": "Automotive"},
+                {"parent_asin": "A2", "item_idx": 2, "source_category": "Automotive"},
+                {"parent_asin": "A3", "item_idx": 3, "source_category": "Automotive"},
+                {"parent_asin": "A4", "item_idx": 4, "source_category": "Automotive"},
+            ]
+        ),
+        item_text_matrix=np.zeros((4, 2), dtype=np.float32),
+        vectorizer=object(),
+        svd=object(),
+        item_id_to_idx={"A1": 1, "A2": 2, "A3": 3, "A4": 4},
+        item_idx_to_id={1: "A1", 2: "A2", 3: "A3", 4: "A4"},
+        category_to_idx={"Automotive": 1},
+    )
+
+    split_artifacts = core.make_splits(prepared)
+
+    assert set(["target_rating", "target_verified_purchase", "target_helpful_vote"]).issubset(split_artifacts.train_examples.columns)
+    assert split_artifacts.train_examples.iloc[0]["target_rating"] == pytest.approx(5.0)
+    assert int(split_artifacts.val_examples.iloc[0]["target_verified_purchase"]) == 0
+    assert split_artifacts.test_examples.iloc[0]["target_helpful_vote"] == pytest.approx(5.0)
+
+
+@pytest.mark.ranking
+def test_ranker_sample_weights_boost_only_positive_rows() -> None:
+    config = core.PipelineConfig(ranker_recent_positive_days=30)
+    metadata = pd.DataFrame(
+        [
+            {"label": 1, "target_rating": 5.0, "target_verified_purchase": 1, "target_helpful_vote": 3, "target_timestamp": pd.Timestamp("2026-05-10", tz="UTC")},
+            {"label": 1, "target_rating": 4.0, "target_verified_purchase": 0, "target_helpful_vote": 0, "target_timestamp": pd.Timestamp("2025-01-01", tz="UTC")},
+            {"label": 0, "target_rating": 5.0, "target_verified_purchase": 1, "target_helpful_vote": 3, "target_timestamp": pd.Timestamp("2026-05-10", tz="UTC")},
+        ]
+    )
+
+    weights = core._ranker_sample_weights(metadata, config)
+
+    assert weights[0] == pytest.approx(1.25 * 1.15 * 1.10 * 1.10)
+    assert weights[1] == pytest.approx(1.0)
+    assert weights[2] == pytest.approx(1.0)
+    np.testing.assert_allclose(core._ranker_group_sample_weights(weights, [2, 1]), np.asarray([weights[0], 1.0], dtype=np.float32))
+
+
+@pytest.mark.ranking
+def test_ranker_demotion_diagnostics_bucket_recovered_positives() -> None:
+    candidate_union = pd.DataFrame(
+        [
+            {"example_id": 1, "item_idx": 101, "target_item_idx": 101, "label": 1, "rank": 1, "target_source_category": "Automotive", "history_length": 1, "from_cooccurrence": 1},
+            {"example_id": 2, "item_idx": 102, "target_item_idx": 102, "label": 1, "rank": 2, "target_source_category": "Automotive", "history_length": 4, "from_cooccurrence": 1},
+            {"example_id": 3, "item_idx": 103, "target_item_idx": 103, "label": 1, "rank": 3, "target_source_category": "Automotive", "history_length": 4, "from_cooccurrence": 1},
+            {"example_id": 4, "item_idx": 104, "target_item_idx": 104, "label": 1, "rank": 4, "target_source_category": "Beauty", "history_length": 12, "from_latent_cf": 1},
+            {"example_id": 5, "item_idx": 105, "target_item_idx": 105, "label": 1, "rank": 5, "target_source_category": "Beauty", "history_length": 12, "from_latent_cf": 1},
+        ]
+    )
+    ranker_candidates = pd.DataFrame(
+        [
+            {"example_id": 2, "item_idx": 999, "label": 0, "rank": 1},
+            {"example_id": 2, "item_idx": 102, "label": 1, "rank": 2},
+            {"example_id": 3, "item_idx": 103, "label": 1, "rank": 1},
+            {"example_id": 4, "item_idx": 104, "label": 1, "rank": 1},
+            {"example_id": 5, "item_idx": 105, "label": 1, "rank": 1},
+        ]
+    )
+    ranked = pd.DataFrame(
+        [
+            {"example_id": 2, "item_idx": 102, "rank": 1, "ranker_score": 0.9},
+            {"example_id": 3, "item_idx": 103, "rank": 15, "ranker_score": 0.3},
+            {"example_id": 4, "item_idx": 104, "rank": 60, "ranker_score": 0.2},
+            {"example_id": 5, "item_idx": 105, "rank": 101, "ranker_score": 0.1},
+        ]
+    )
+
+    diagnostics = core.ranker_demotion_diagnostics(
+        candidate_union,
+        ranker_candidates,
+        ranked,
+        split="test",
+        variant="hybrid_union",
+    )
+
+    buckets = dict(zip(diagnostics["example_id"], diagnostics["demotion_bucket"]))
+    assert buckets == {
+        1: "lost",
+        2: "preserved",
+        3: "demoted_top10",
+        4: "demoted_top50",
+        5: "demoted_top100",
+    }
+    summary = core.ranker_demotion_summary(diagnostics)
+    assert set(summary["demotion_bucket"]).issuperset(set(buckets.values()))
+
+
+@pytest.mark.ranking
+def test_ranker_feature_ablation_masks_only_selected_columns() -> None:
+    config = core.PipelineConfig(categories=("Automotive",))
+    feature_frame = pd.DataFrame(
+        {
+            "retrieval_score": [0.8, 0.3],
+            "from_cooccurrence": [1, 0],
+            "rank_cooccurrence": [1, 2],
+            "source_count": [2, 1],
+            "pref_Automotive": [0.7, 0.1],
+            "price": [10.0, 20.0],
+            "explicit_hard_negative": [1, 0],
+        }
+    )
+
+    masked = core._mask_ranker_feature_group(
+        feature_frame,
+        core._ranker_feature_ablation_groups(config)["source_flags_ranks"],
+    )
+
+    assert masked["from_cooccurrence"].tolist() == [0.0, 0.0]
+    assert masked["rank_cooccurrence"].tolist() == [3.0, 3.0]
+    assert masked["source_count"].tolist() == [0.0, 0.0]
+    assert masked["retrieval_score"].tolist() == feature_frame["retrieval_score"].tolist()
+    assert masked["pref_Automotive"].tolist() == feature_frame["pref_Automotive"].tolist()
+    assert masked["price"].tolist() == feature_frame["price"].tolist()
+
+
+@pytest.mark.ranking
+def test_xgboost_ranker_fit_receives_sample_weights(monkeypatch, workspace_dir: Path) -> None:
+    config = core.PipelineConfig(
+        base_dir=workspace_dir,
+        categories=("Automotive",),
+        ranker_label_weighting_enabled=True,
+        xgb_early_stopping_rounds=None,
+    )
+    core.ensure_directories(config)
+    prepared = SimpleNamespace(config=config)
+    split_artifacts = SimpleNamespace(
+        train_examples=pd.DataFrame([{"split": "train"}]),
+        val_examples=pd.DataFrame([{"split": "val"}]),
+    )
+    retrievers = {"content_based": SimpleNamespace(variant="content_based")}
+    captured_fit_kwargs: dict[str, object] = {}
+
+    class FakeRanker:
+        def __init__(self, **_kwargs):
+            pass
+
+        def fit(self, _frame, _labels, **kwargs):
+            captured_fit_kwargs.update(kwargs)
+            return self
+
+        def evals_result(self):
+            return {"validation_0": {"ndcg@10": [1.0]}}
+
+        def save_model(self, path):
+            Path(path).write_text("fake model", encoding="utf-8")
+
+    def fake_candidates(_prepared, _split_artifacts, _retrievers, examples, **_kwargs):
+        return pd.DataFrame([{"phase": examples.iloc[0]["split"]}])
+
+    def fake_xgboost_frame(_prepared, _split_artifacts, _retriever, candidates):
+        phase = str(candidates.iloc[0]["phase"])
+        metadata = pd.DataFrame(
+            [
+                {"example_id": 1, "label": 1, "target_rating": 5.0, "target_verified_purchase": 1, "target_helpful_vote": 2, "target_timestamp": pd.Timestamp("2026-05-10", tz="UTC")},
+                {"example_id": 1, "label": 0, "target_rating": 5.0, "target_verified_purchase": 1, "target_helpful_vote": 2, "target_timestamp": pd.Timestamp("2026-05-10", tz="UTC")},
+            ]
+        )
+        frame = pd.DataFrame({"retrieval_score": [0.8, 0.2], "rank": [1.0, 2.0]})
+        labels = np.asarray([1, 0], dtype=np.int32)
+        if phase == "val":
+            frame = frame.copy()
+        return metadata, frame, labels, [2]
+
+    monkeypatch.setattr(core, "xgb", SimpleNamespace(XGBRanker=FakeRanker))
+    monkeypatch.setattr(core, "_ranker_candidates_for_examples", fake_candidates)
+    monkeypatch.setattr(core, "_rebalance_ranker_candidates", lambda candidates, *_args, **_kwargs: candidates)
+    monkeypatch.setattr(core, "_xgboost_ranker_frame", fake_xgboost_frame)
+    monkeypatch.setattr(
+        core,
+        "evaluate_ranker",
+        lambda *_args, **_kwargs: pd.DataFrame([{"K": 10, "recall": 1.0, "mrr": 1.0, "ndcg": 1.0, "split": "val", "variant": "hybrid_union", "stage": "ranker"}]),
+    )
+
+    core.train_ranker(prepared, split_artifacts, retrievers, backend="xgboost")
+
+    assert "sample_weight" in captured_fit_kwargs
+    assert "sample_weight_eval_set" in captured_fit_kwargs
+    train_weights = captured_fit_kwargs["sample_weight"]
+    assert train_weights[0] > train_weights[1]
+    assert train_weights[1] == pytest.approx(1.0)
+
+
+@pytest.mark.ranking
+def test_pipeline_config_from_settings_exposes_ranker_weight_knobs(test_settings) -> None:
+    settings = test_settings.model_copy(
+        update={
+            "ranker_label_weighting_enabled": False,
+            "ranker_positive_rating5_weight": 1.5,
+            "ranker_verified_positive_weight": 1.2,
+            "ranker_helpful_positive_weight": 1.1,
+            "ranker_recent_positive_weight": 1.05,
+            "ranker_recent_positive_days": 45,
+        }
+    )
+
+    config = pipeline_config_from_settings(settings)
+
+    assert config.ranker_label_weighting_enabled is False
+    assert config.ranker_positive_rating5_weight == pytest.approx(1.5)
+    assert config.ranker_verified_positive_weight == pytest.approx(1.2)
+    assert config.ranker_helpful_positive_weight == pytest.approx(1.1)
+    assert config.ranker_recent_positive_weight == pytest.approx(1.05)
+    assert config.ranker_recent_positive_days == 45
 
 
 @pytest.mark.retrieval
@@ -311,6 +547,21 @@ def test_source_balanced_union_applies_reserved_latent_quota(monkeypatch) -> Non
     union = core.generate_candidate_union(prepared, split_artifacts, {}, examples, top_k=10, inject_target_if_missing=False)
 
     assert int(union["from_latent_cf"].sum()) >= 2
+
+
+@pytest.mark.retrieval
+def test_recall_first_source_quotas_prioritize_cooccurrence_and_blair() -> None:
+    config = core.PipelineConfig(categories=("Automotive",))
+
+    quotas = core._candidate_source_balance_quotas(100, include_neural=True, config=config)
+
+    assert quotas == {
+        "cooccurrence": 35,
+        "latent_cf": 10,
+        "content_based": 15,
+        "two_tower": 30,
+        "popularity": 10,
+    }
 
 
 @pytest.mark.retrieval
@@ -547,6 +798,102 @@ def test_candidate_recovery_diagnostics_do_not_inject_targets(monkeypatch) -> No
 
 
 @pytest.mark.retrieval
+def test_anonymous_no_history_diagnostics_use_target_category_as_context() -> None:
+    config = core.PipelineConfig(categories=("Automotive", "Industrial_and_Scientific"))
+    prepared = SimpleNamespace(
+        config=config,
+        item_features=pd.DataFrame(
+            [
+                {"item_idx": 1, "source_category": "Automotive"},
+                {"item_idx": 2, "source_category": "Industrial_and_Scientific"},
+            ]
+        ),
+    )
+    examples = pd.DataFrame(
+        [
+            {
+                "example_id": 1,
+                "split": "test",
+                "user_id": "u1",
+                "user_idx": 1,
+                "history_item_idxs": [2],
+                "target_item_idx": 1,
+                "target_parent_asin": "A1",
+                "target_timestamp": pd.Timestamp("2026-01-01"),
+                "target_source_category": "Automotive",
+                "history_length": 1,
+                "user_interaction_count": 1.0,
+                "user_mean_rating": 5.0,
+                "user_verified_rate": 1.0,
+                "days_since_last": 1.0,
+                "avg_days_between": 1.0,
+                "pref_Automotive": 0.0,
+                "pref_Industrial_and_Scientific": 1.0,
+            }
+        ]
+    )
+
+    scenario_examples = core._candidate_diagnostic_examples(prepared, examples, "anonymous_no_history")
+
+    assert scenario_examples.iloc[0]["history_length"] == 0
+    assert scenario_examples.iloc[0]["pref_Automotive"] == 1.0
+    assert scenario_examples.iloc[0]["pref_Industrial_and_Scientific"] == 0.0
+
+
+@pytest.mark.retrieval
+def test_contextual_popularity_backfill_blends_category_and_global_items() -> None:
+    config = core.PipelineConfig(
+        categories=("Automotive", "Industrial_and_Scientific"),
+        category_backfill_enabled=True,
+        cold_start_context_global_reserve_fraction=0.30,
+    )
+    split_artifacts = SimpleNamespace(
+        config=config,
+        train_item_popularity=Counter({100: 500, 101: 100, 102: 90, 201: 80, 202: 70}),
+        category_item_popularity={
+            "Automotive": Counter({101: 100, 102: 90, 103: 80, 104: 70, 105: 60, 106: 50, 107: 40}),
+            "Industrial_and_Scientific": Counter({201: 80, 202: 70}),
+        },
+    )
+    examples = pd.DataFrame(
+        [
+            {
+                "example_id": 1,
+                "split": "inference",
+                "user_id": "__cold_start__",
+                "history_item_idxs": [],
+                "target_item_idx": 101,
+                "pref_Automotive": 1.0,
+                "pref_Industrial_and_Scientific": 0.0,
+            }
+        ]
+    )
+
+    candidates = core.popularity_by_category_candidates(split_artifacts, examples, top_k=10)
+
+    assert len(candidates) == 10
+    assert set(candidates["item_idx"]).issuperset({101, 102, 100, 201})
+
+
+@pytest.mark.retrieval
+def test_blair_retriever_requires_recall_gate_for_candidate_union() -> None:
+    config = core.PipelineConfig(blair_promotion_min_recall_at_100=0.06)
+    retriever = SimpleNamespace(
+        variant="blair_text",
+        metrics=pd.DataFrame(
+            [
+                {"split": "test", "K": 100, "recall": 0.02},
+                {"split": "val", "K": 100, "recall": 0.08},
+            ]
+        ),
+    )
+
+    assert core._retriever_meets_promotion_gate(retriever, config) is False
+    retriever.metrics.loc[retriever.metrics["split"] == "test", "recall"] = 0.06
+    assert core._retriever_meets_promotion_gate(retriever, config) is True
+
+
+@pytest.mark.retrieval
 def test_two_tower_vector_serving_query_uses_history_embedding_mean() -> None:
     retriever = SimpleNamespace(
         variant="two_tower",
@@ -608,12 +955,12 @@ def test_quality_profile_raises_debug_sized_candidate_budgets(test_settings, cap
     with caplog.at_level("WARNING"):
         config = pipeline_config_from_settings(settings)
 
-    assert config.candidate_union_top_k == 500
-    assert config.ranker_candidate_top_k == 200
-    assert config.cooccurrence_candidate_k == 250
-    assert config.latent_cf_candidate_k == 250
-    assert config.content_candidate_k == 250
-    assert config.popularity_backfill_k == 100
+    assert config.candidate_union_top_k == 750
+    assert config.ranker_candidate_top_k == 300
+    assert config.cooccurrence_candidate_k == 300
+    assert config.latent_cf_candidate_k == 200
+    assert config.content_candidate_k == 300
+    assert config.popularity_backfill_k == 150
     assert "Candidate budget settings were below the quality profile floor" in caplog.text
 
 
@@ -626,9 +973,9 @@ def test_quality_neural_profile_defaults_to_blair_and_neural_budget_floors(test_
 
     assert config.enable_neural_retriever is True
     assert config.neural_retriever_variant == "blair_text"
-    assert config.candidate_union_top_k == 650
-    assert config.ranker_candidate_top_k == 250
-    assert config.neural_candidate_k == 250
+    assert config.candidate_union_top_k == 1_000
+    assert config.ranker_candidate_top_k == 400
+    assert config.neural_candidate_k == 400
     assert "Candidate budget settings were below the quality-neural profile floor" in caplog.text
 
     override = pipeline_config_from_settings(
@@ -653,8 +1000,8 @@ def test_quality_neural_profile_applies_scale_defaults_when_not_explicit(workspa
     assert config.neural_retriever_variant == "blair_text"
     assert config.eval_user_cap == 2_000
     assert config.ranker_train_example_cap == 10_000
-    assert config.candidate_union_top_k == 650
-    assert config.ranker_candidate_top_k == 250
+    assert config.candidate_union_top_k == 1_000
+    assert config.ranker_candidate_top_k == 400
 
 
 @pytest.mark.retrieval
@@ -673,10 +1020,10 @@ def test_medium_neural_profile_applies_blair_smaller_defaults(workspace_dir: Pat
     assert config.neural_retriever_variant == "blair_text"
     assert config.max_rows_per_category == 500_000
     assert config.blair_item_cap == 250_000
-    assert config.eval_user_cap == 1_000
+    assert config.eval_user_cap == 2_000
     assert config.ranker_train_example_cap == 5_000
-    assert config.candidate_union_top_k == 500
-    assert config.ranker_candidate_top_k == 150
+    assert config.candidate_union_top_k == 750
+    assert config.ranker_candidate_top_k == 250
 
 
 @pytest.mark.retrieval

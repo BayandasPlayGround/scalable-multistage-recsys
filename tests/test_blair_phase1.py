@@ -344,6 +344,96 @@ def test_train_blair_retriever_resumes_from_completed_rows(monkeypatch: pytest.M
     assert state["completed_rows"] == 3
 
 
+def test_train_blair_retriever_repairs_missing_state_from_partial_memmap(monkeypatch: pytest.MonkeyPatch, workspace_dir: Path) -> None:
+    core, prepared = _build_prepared(workspace_dir)
+    prepared.config.blair_chunk_rows = 1
+    blair = _import_blair()
+    embedding_path = prepared.config.model_dir / "blair_text_item_embeddings.npy"
+    state_path = prepared.config.model_dir / "blair_text_item_embeddings_state.json"
+    existing = np.lib.format.open_memmap(embedding_path, mode="w+", dtype=np.float32, shape=(3, 2))
+    existing[0] = np.asarray([1.0, 0.0], dtype=np.float32)
+    existing.flush()
+    mmap_handle = getattr(existing, "_mmap", None)
+    if mmap_handle is not None:
+        mmap_handle.close()
+    del existing
+    assert not state_path.exists()
+    captured_texts: list[list[str]] = []
+
+    class _FakeEncoder:
+        def get_sentence_embedding_dimension(self):
+            return 2
+
+        def encode(self, texts, **_kwargs):
+            captured_texts.append(list(texts))
+            return np.asarray([[0.0, 1.0]][: len(texts)], dtype=np.float32)
+
+    monkeypatch.setattr(blair, "_load_sentence_transformer", lambda *_a, **_k: (_FakeEncoder(), "fake-encoder", "cpu"))
+    monkeypatch.setattr(blair, "_load_rich_metadata", lambda *_a, **_k: None)
+    monkeypatch.setattr(core, "build_ann_index", lambda *_a, **_k: workspace_dir / "fake.ann")
+    monkeypatch.setattr(core, "_load_ann_index", lambda *_a, **_k: object())
+    monkeypatch.setattr(core, "evaluate_retriever", lambda *_a, **_k: pd.DataFrame())
+
+    artifacts = blair.train_blair_retriever(prepared, object())  # type: ignore[arg-type]
+
+    assert artifacts.item_embeddings.shape == (3, 2)
+    assert captured_texts == [["Car battery charger Automotive"], ["Soldering iron kit Industrial_and_Scientific"]]
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["complete"] is True
+    assert state["completed_rows"] == 3
+
+
+def test_load_embedding_state_repairs_stale_completed_rows(workspace_dir: Path) -> None:
+    core, prepared = _build_prepared(workspace_dir)
+    blair = _import_blair()
+    embedding_path = prepared.config.model_dir / "blair_text_item_embeddings.npy"
+    state_path = prepared.config.model_dir / "blair_text_item_embeddings_state.json"
+    existing = np.lib.format.open_memmap(embedding_path, mode="w+", dtype=np.float32, shape=(3, 2))
+    existing[0] = np.asarray([1.0, 0.0], dtype=np.float32)
+    existing.flush()
+    mmap_handle = getattr(existing, "_mmap", None)
+    if mmap_handle is not None:
+        mmap_handle.close()
+    del existing
+    state_path.write_text(
+        json.dumps(
+            {
+                "complete": False,
+                "completed_rows": 2,
+                "item_count": 3,
+                "item_cap": None,
+                "configured_model_name": prepared.config.blair_model_name,
+                "fallback_model_name": prepared.config.blair_fallback_model,
+                "max_seq_length": prepared.config.blair_max_seq_length,
+                "projection_dim": prepared.config.blair_projection_dim,
+                "raw_embedding_dim": 2,
+                "embedding_dim": 2,
+                "chunk_rows": prepared.config.blair_chunk_rows,
+                "seed": prepared.config.seed,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = blair._load_embedding_state(
+        state_path,
+        embedding_path,
+        item_count=3,
+        configured_model_name=prepared.config.blair_model_name,
+        fallback_model_name=prepared.config.blair_fallback_model,
+        max_seq_length=prepared.config.blair_max_seq_length,
+        projection_dim=prepared.config.blair_projection_dim,
+        chunk_rows=prepared.config.blair_chunk_rows,
+        seed=prepared.config.seed,
+        item_cap=None,
+        repair_enabled=True,
+    )
+
+    assert state is not None
+    assert state["completed_rows"] == 1
+    assert state["complete"] is False
+
+
 def test_load_sentence_transformer_falls_back_when_primary_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     blair = _import_blair()
 

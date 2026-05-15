@@ -52,6 +52,8 @@ class RetrievalConfig(BaseModel):
     blair_chunk_rows: int = 25_000
     blair_device: str = "auto"
     blair_item_cap: int | None = None
+    blair_state_repair_enabled: bool = True
+    blair_promotion_min_recall_at_100: float = 0.06
     retrieval_top_k: int = 50
     candidate_union_top_k: int = 75
     candidate_union_batch_size: int = 100
@@ -59,9 +61,26 @@ class RetrievalConfig(BaseModel):
     latent_cf_candidate_k: int = 50
     content_candidate_k: int = 50
     neural_candidate_k: int = 50
+    popularity_backfill_k: int = 50
     category_backfill_enabled: bool = True
+    category_backfill_global_reserve_fraction: float = 0.20
+    cold_start_context_global_reserve_fraction: float = 0.30
     recency_cooccurrence_enabled: bool = True
     candidate_source_balance_enabled: bool = True
+    candidate_source_weight_cooccurrence: float = 1.15
+    candidate_source_weight_latent_cf: float = 0.60
+    candidate_source_weight_content_based: float = 0.85
+    candidate_source_weight_two_tower: float = 1.10
+    candidate_source_weight_popularity: float = 0.30
+    candidate_quota_cooccurrence: float = 0.40
+    candidate_quota_latent_cf: float = 0.20
+    candidate_quota_content_based: float = 0.25
+    candidate_quota_popularity: float = 0.15
+    candidate_quota_neural_cooccurrence: float = 0.35
+    candidate_quota_neural_latent_cf: float = 0.10
+    candidate_quota_neural_content_based: float = 0.15
+    candidate_quota_neural_two_tower: float = 0.30
+    candidate_quota_neural_popularity: float = 0.10
     vector_retriever_trigger_count: int = 5
 
 
@@ -72,11 +91,18 @@ class RankingConfig(BaseModel):
     ranker_val_example_cap: int | None = 250
     ranker_negatives_per_positive: int = 5
     ranker_hardneg_mix: str = "0,0,1.0"
+    ranker_label_weighting_enabled: bool = True
+    ranker_positive_rating5_weight: float = 1.25
+    ranker_verified_positive_weight: float = 1.15
+    ranker_helpful_positive_weight: float = 1.10
+    ranker_recent_positive_weight: float = 1.10
+    ranker_recent_positive_days: int = 90
     xgb_learning_rate: float = 0.05
     xgb_n_estimators: int = 100
     xgb_max_depth: int = 6
     xgb_subsample: float = 0.8
     xgb_colsample_bytree: float = 0.8
+    xgb_early_stopping_rounds: int | None = 25
 
 
 class GateConfig(BaseModel):
@@ -197,6 +223,8 @@ class AppSettings(BaseSettings):
     blair_chunk_rows: int = 25_000
     blair_device: str = "auto"
     blair_item_cap: int | None = None
+    blair_state_repair_enabled: bool = True
+    blair_promotion_min_recall_at_100: float = 0.06
     retrieval_top_k: int = 50
     candidate_union_top_k: int = 75
     candidate_union_batch_size: int = 100
@@ -204,9 +232,26 @@ class AppSettings(BaseSettings):
     latent_cf_candidate_k: int = 50
     content_candidate_k: int = 50
     neural_candidate_k: int = 50
+    popularity_backfill_k: int = 50
     category_backfill_enabled: bool = True
+    category_backfill_global_reserve_fraction: float = 0.20
+    cold_start_context_global_reserve_fraction: float = 0.30
     recency_cooccurrence_enabled: bool = True
     candidate_source_balance_enabled: bool = True
+    candidate_source_weight_cooccurrence: float = 1.15
+    candidate_source_weight_latent_cf: float = 0.60
+    candidate_source_weight_content_based: float = 0.85
+    candidate_source_weight_two_tower: float = 1.10
+    candidate_source_weight_popularity: float = 0.30
+    candidate_quota_cooccurrence: float = 0.40
+    candidate_quota_latent_cf: float = 0.20
+    candidate_quota_content_based: float = 0.25
+    candidate_quota_popularity: float = 0.15
+    candidate_quota_neural_cooccurrence: float = 0.35
+    candidate_quota_neural_latent_cf: float = 0.10
+    candidate_quota_neural_content_based: float = 0.15
+    candidate_quota_neural_two_tower: float = 0.30
+    candidate_quota_neural_popularity: float = 0.10
     vector_retriever_trigger_count: int = 5
 
     ranker_backend: str = "xgboost"
@@ -215,11 +260,18 @@ class AppSettings(BaseSettings):
     ranker_val_example_cap: int | None = 250
     ranker_negatives_per_positive: int = 5
     ranker_hardneg_mix: str = "0,0,1.0"
+    ranker_label_weighting_enabled: bool = True
+    ranker_positive_rating5_weight: float = 1.25
+    ranker_verified_positive_weight: float = 1.15
+    ranker_helpful_positive_weight: float = 1.10
+    ranker_recent_positive_weight: float = 1.10
+    ranker_recent_positive_days: int = 90
     xgb_learning_rate: float = 0.05
     xgb_n_estimators: int = 100
     xgb_max_depth: int = 6
     xgb_subsample: float = 0.8
     xgb_colsample_bytree: float = 0.8
+    xgb_early_stopping_rounds: int | None = 25
 
     gate_profile: str = "off"
 
@@ -410,6 +462,8 @@ class AppSettings(BaseSettings):
             blair_chunk_rows=self.blair_chunk_rows,
             blair_device=self.blair_device,
             blair_item_cap=self.blair_item_cap,
+            blair_state_repair_enabled=self.blair_state_repair_enabled,
+            blair_promotion_min_recall_at_100=self.blair_promotion_min_recall_at_100,
             retrieval_top_k=self.retrieval_top_k,
             candidate_union_top_k=self.candidate_union_top_k,
             candidate_union_batch_size=self.candidate_union_batch_size,
@@ -417,9 +471,26 @@ class AppSettings(BaseSettings):
             latent_cf_candidate_k=self.latent_cf_candidate_k,
             content_candidate_k=self.content_candidate_k,
             neural_candidate_k=self.neural_candidate_k,
+            popularity_backfill_k=self.popularity_backfill_k,
             category_backfill_enabled=self.category_backfill_enabled,
+            category_backfill_global_reserve_fraction=self.category_backfill_global_reserve_fraction,
+            cold_start_context_global_reserve_fraction=self.cold_start_context_global_reserve_fraction,
             recency_cooccurrence_enabled=self.recency_cooccurrence_enabled,
             candidate_source_balance_enabled=self.candidate_source_balance_enabled,
+            candidate_source_weight_cooccurrence=self.candidate_source_weight_cooccurrence,
+            candidate_source_weight_latent_cf=self.candidate_source_weight_latent_cf,
+            candidate_source_weight_content_based=self.candidate_source_weight_content_based,
+            candidate_source_weight_two_tower=self.candidate_source_weight_two_tower,
+            candidate_source_weight_popularity=self.candidate_source_weight_popularity,
+            candidate_quota_cooccurrence=self.candidate_quota_cooccurrence,
+            candidate_quota_latent_cf=self.candidate_quota_latent_cf,
+            candidate_quota_content_based=self.candidate_quota_content_based,
+            candidate_quota_popularity=self.candidate_quota_popularity,
+            candidate_quota_neural_cooccurrence=self.candidate_quota_neural_cooccurrence,
+            candidate_quota_neural_latent_cf=self.candidate_quota_neural_latent_cf,
+            candidate_quota_neural_content_based=self.candidate_quota_neural_content_based,
+            candidate_quota_neural_two_tower=self.candidate_quota_neural_two_tower,
+            candidate_quota_neural_popularity=self.candidate_quota_neural_popularity,
             vector_retriever_trigger_count=self.vector_retriever_trigger_count,
         )
 
@@ -432,11 +503,18 @@ class AppSettings(BaseSettings):
             ranker_val_example_cap=self.ranker_val_example_cap,
             ranker_negatives_per_positive=self.ranker_negatives_per_positive,
             ranker_hardneg_mix=self.ranker_hardneg_mix,
+            ranker_label_weighting_enabled=self.ranker_label_weighting_enabled,
+            ranker_positive_rating5_weight=self.ranker_positive_rating5_weight,
+            ranker_verified_positive_weight=self.ranker_verified_positive_weight,
+            ranker_helpful_positive_weight=self.ranker_helpful_positive_weight,
+            ranker_recent_positive_weight=self.ranker_recent_positive_weight,
+            ranker_recent_positive_days=self.ranker_recent_positive_days,
             xgb_learning_rate=self.xgb_learning_rate,
             xgb_n_estimators=self.xgb_n_estimators,
             xgb_max_depth=self.xgb_max_depth,
             xgb_subsample=self.xgb_subsample,
             xgb_colsample_bytree=self.xgb_colsample_bytree,
+            xgb_early_stopping_rounds=self.xgb_early_stopping_rounds,
         )
 
     @property

@@ -79,6 +79,17 @@ def _load_sentence_transformer(model_name: str, fallback_model: str, max_seq_len
     return encoder, resolved_name, resolved_device
 
 
+def _encoder_embedding_dimension(encoder: object) -> int | None:
+    getter = getattr(encoder, "get_sentence_embedding_dimension", None)
+    if getter is None:
+        return None
+    try:
+        value = getter()
+    except Exception:  # noqa: BLE001 - dimension inference is best-effort
+        return None
+    return int(value) if value is not None else None
+
+
 _RICH_METADATA_COLUMNS = (
     "meta_title",
     "store",
@@ -167,6 +178,89 @@ def _project_and_normalize(embeddings: np.ndarray, projection: np.ndarray | None
     return core._normalize_rows(np.asarray(vectors, dtype=np.float32))
 
 
+def _completed_embedding_rows(embeddings: np.ndarray, *, chunk_rows: int = 8192) -> int:
+    rows = int(embeddings.shape[0])
+    completed = 0
+    for start in range(0, rows, max(int(chunk_rows), 1)):
+        end = min(start + max(int(chunk_rows), 1), rows)
+        chunk = np.asarray(embeddings[start:end], dtype=np.float32)
+        valid = np.isfinite(chunk).all(axis=1) & (np.linalg.norm(chunk, axis=1) > 1e-6)
+        if bool(valid.all()):
+            completed = end
+            continue
+        first_missing = int(np.argmax(~valid))
+        return start + first_missing
+    return completed
+
+
+def _base_state_payload(
+    *,
+    item_count: int,
+    configured_model_name: str,
+    fallback_model_name: str,
+    max_seq_length: int,
+    projection_dim: int,
+    chunk_rows: int,
+    seed: int,
+    item_cap: int | None,
+) -> dict[str, object]:
+    return {
+        "item_count": int(item_count),
+        "item_cap": int(item_cap) if item_cap is not None else None,
+        "configured_model_name": str(configured_model_name),
+        "fallback_model_name": str(fallback_model_name),
+        "max_seq_length": int(max_seq_length),
+        "projection_dim": int(projection_dim),
+        "chunk_rows": int(chunk_rows),
+        "seed": int(seed),
+    }
+
+
+def _repair_embedding_state(
+    state_path: Path,
+    embeddings: np.ndarray,
+    *,
+    item_count: int,
+    enabled: bool,
+    expected: dict[str, object],
+    stored_state: dict[str, object] | None = None,
+) -> dict[str, object] | None:
+    if not enabled:
+        return None
+    completed_rows = _completed_embedding_rows(embeddings)
+    if completed_rows <= 0:
+        LOGGER.info("BLAIR embedding state repair found no completed rows. Rebuilding embeddings.")
+        return None
+    repaired = {
+        **expected,
+        **(stored_state or {}),
+        "complete": completed_rows >= item_count,
+        "completed_rows": int(completed_rows),
+        "item_count": int(item_count),
+        "embedding_dim": int(embeddings.shape[1]),
+        "state_repaired": True,
+        "state_repair_reason": "missing_or_stale_state",
+    }
+    if not repaired.get("raw_embedding_dim"):
+        repaired["raw_embedding_dim"] = None
+    if not repaired.get("encoder_name"):
+        repaired["encoder_name"] = ""
+    if not repaired.get("device"):
+        repaired["device"] = ""
+    if not repaired.get("item_text_columns"):
+        repaired["item_text_columns"] = ["title", "source_category"]
+    if not repaired.get("item_text_source_counts"):
+        repaired["item_text_source_counts"] = {"rich": 0, "fallback": int(completed_rows)}
+    _write_embedding_state(state_path, repaired)
+    LOGGER.warning(
+        "BLAIR resume state repaired from embedding memmap: completed_rows=%s/%s path=%s",
+        f"{completed_rows:,}",
+        f"{item_count:,}",
+        state_path,
+    )
+    return repaired
+
+
 def _load_embedding_state(
     state_path: Path,
     embedding_path: Path,
@@ -179,9 +273,40 @@ def _load_embedding_state(
     chunk_rows: int,
     seed: int,
     item_cap: int | None,
+    repair_enabled: bool = True,
 ) -> dict[str, object] | None:
-    if not state_path.exists() or not embedding_path.exists():
+    if not embedding_path.exists():
         return None
+    expected = _base_state_payload(
+        item_count=item_count,
+        configured_model_name=configured_model_name,
+        fallback_model_name=fallback_model_name,
+        max_seq_length=max_seq_length,
+        projection_dim=projection_dim,
+        chunk_rows=chunk_rows,
+        seed=seed,
+        item_cap=item_cap,
+    )
+    if not state_path.exists():
+        try:
+            embeddings = np.load(embedding_path, mmap_mode="r")
+        except Exception as exc:  # noqa: BLE001 - invalid memmap should cause a clean rebuild
+            LOGGER.warning("BLAIR embedding memmap could not be read without state (%s). Rebuilding embeddings.", exc)
+            return None
+        if int(embeddings.shape[0]) != item_count:
+            LOGGER.info(
+                "BLAIR embedding shape mismatch during state repair: stored_rows=%s expected_rows=%s. Rebuilding embeddings.",
+                embeddings.shape[0],
+                item_count,
+            )
+            return None
+        return _repair_embedding_state(
+            state_path,
+            embeddings,
+            item_count=item_count,
+            enabled=repair_enabled,
+            expected=expected,
+        )
     try:
         with open(state_path, "r", encoding="utf-8") as handle:
             state = json.load(handle)
@@ -189,16 +314,6 @@ def _load_embedding_state(
     except Exception as exc:  # noqa: BLE001 - invalid state should cause a clean rebuild
         LOGGER.warning("BLAIR resume state could not be read (%s). Rebuilding embeddings.", exc)
         return None
-    expected = {
-        "item_count": int(item_count),
-        "configured_model_name": str(configured_model_name),
-        "fallback_model_name": str(fallback_model_name),
-        "max_seq_length": int(max_seq_length),
-        "projection_dim": int(projection_dim),
-        "chunk_rows": int(chunk_rows),
-        "seed": int(seed),
-        "item_cap": int(item_cap) if item_cap is not None else None,
-    }
     for key, expected_value in expected.items():
         if state.get(key) != expected_value:
             LOGGER.info(
@@ -226,6 +341,21 @@ def _load_embedding_state(
     completed_rows = int(state.get("completed_rows", 0))
     if completed_rows < 0 or completed_rows > item_count:
         return None
+    actual_completed_rows = _completed_embedding_rows(embeddings)
+    if actual_completed_rows != completed_rows or (bool(state.get("complete")) and actual_completed_rows < item_count):
+        LOGGER.warning(
+            "BLAIR resume state disagreed with the embedding memmap: state_rows=%s actual_rows=%s. Repairing state.",
+            completed_rows,
+            actual_completed_rows,
+        )
+        return _repair_embedding_state(
+            state_path,
+            embeddings,
+            item_count=item_count,
+            enabled=repair_enabled,
+            expected=expected,
+            stored_state=state,
+        )
     return state
 
 
@@ -294,6 +424,7 @@ def train_blair_retriever(
         chunk_rows=chunk_rows,
         seed=int(config.seed),
         item_cap=int(config.blair_item_cap) if config.blair_item_cap is not None else None,
+        repair_enabled=bool(config.blair_state_repair_enabled),
     )
     text_source_counts = (
         dict(state.get("item_text_source_counts", {"rich": 0, "fallback": 0}))
@@ -337,10 +468,38 @@ def train_blair_retriever(
                 f"{item_count:,}",
                 embedding_path,
             )
-            if raw_embedding_dim is None or embedding_dim is None:
-                raise RuntimeError("BLAIR resume state is missing embedding dimensions.")
-            item_embeddings_writer = np.lib.format.open_memmap(embedding_path, mode="r+")
-            projection = _projection_matrix(raw_embedding_dim, int(config.blair_projection_dim), config.seed)
+            if raw_embedding_dim is None:
+                raw_embedding_dim = _encoder_embedding_dimension(encoder)
+                if raw_embedding_dim is None:
+                    LOGGER.warning(
+                        "BLAIR repaired resume state is missing raw embedding dimension and the encoder did not expose it. "
+                        "Rebuilding embeddings from row 0."
+                    )
+                    completed_rows = 0
+                    text_source_counts = {"rich": 0, "fallback": 0}
+            if completed_rows > 0:
+                existing_embeddings = np.load(embedding_path, mmap_mode="r")
+                if raw_embedding_dim is None:
+                    raise RuntimeError("BLAIR resume state is missing embedding dimensions.")
+                projection = _projection_matrix(raw_embedding_dim, int(config.blair_projection_dim), config.seed)
+                expected_embedding_dim = int(projection.shape[1]) if projection is not None else int(raw_embedding_dim)
+                if embedding_dim is None:
+                    embedding_dim = expected_embedding_dim
+                if int(existing_embeddings.shape[1]) != expected_embedding_dim:
+                    LOGGER.warning(
+                        "BLAIR repaired resume state dimension mismatch: stored_dim=%s expected_dim=%s. Rebuilding embeddings from row 0.",
+                        existing_embeddings.shape[1],
+                        expected_embedding_dim,
+                    )
+                    completed_rows = 0
+                    text_source_counts = {"rich": 0, "fallback": 0}
+                    projection = None
+                    embedding_dim = None
+                del existing_embeddings
+            if completed_rows <= 0:
+                item_embeddings_writer = None
+            else:
+                item_embeddings_writer = np.lib.format.open_memmap(embedding_path, mode="r+")
         LOGGER.info(
             "Encoding %d BLAIR item texts with %s on %s (batch=%d, max_seq=%d chunk_rows=%d projection_dim=%d rich_metadata=%s)",
             item_count,
@@ -462,7 +621,7 @@ def train_blair_retriever(
             "fallback_model_name": config.blair_fallback_model,
             "embedding_dim": int(item_embeddings.shape[1]),
             "raw_embedding_dim": int(raw_embedding_dim or item_embeddings.shape[1]),
-            "projection_dim": int(item_embeddings.shape[1]),
+            "projection_dim": int(config.blair_projection_dim),
             "chunk_rows": int(config.blair_chunk_rows),
             "ann_trees": int(config.blair_ann_trees),
             "batch_size": int(config.blair_batch_size),
